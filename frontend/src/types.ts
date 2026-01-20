@@ -44,6 +44,7 @@ export interface StrategyBundle {
 }
 
 export interface StrategyResponse {
+  symbol: string;
   status: string;
   market: MarketSnapshot | null;
   balances: Balance[];
@@ -53,5 +54,10 @@ export interface StrategyResponse {
     riskPerTradeFraction: number;
     feeRate: { maker: number; taker: number };
   };
+  quoteAsset: string;
+  availableSymbols: string[];
   lastUpdated: number | null;
+  error?: string;
+  riskFlags?: string[];
+  tradeHalted?: boolean;
 }

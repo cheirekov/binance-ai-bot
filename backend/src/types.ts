@@ -9,6 +9,7 @@ export interface MarketSnapshot {
   highPrice: number;
   lowPrice: number;
   volume: number;
+  quoteVolume?: number;
   updatedAt: number;
 }
 
@@ -65,4 +66,37 @@ export interface StrategyState {
   lastUpdated: number | null;
   status: 'idle' | 'refreshing' | 'error' | 'ready';
   error?: string;
+  riskFlags: string[];
+  tradeHalted: boolean;
+}
+
+export interface StrategyResponsePayload {
+  status: StrategyState['status'];
+  symbol: string;
+  market: MarketSnapshot | null;
+  balances: Balance[];
+  strategies: StrategyBundle | null;
+  risk: RiskSettings;
+  quoteAsset: string;
+  availableSymbols: string[];
+  lastUpdated: number | null;
+  error?: string;
+  riskFlags: string[];
+  tradeHalted: boolean;
+}
+
+export interface PersistedPayload {
+  strategies: Record<string, StrategyResponsePayload>;
+  lastTrades: Record<string, number>;
+  positions: Record<
+    string,
+    {
+      symbol: string;
+      horizon: Horizon;
+      side: Side;
+      entryPrice: number;
+      size: number;
+      openedAt: number;
+    }
+  >;
 }

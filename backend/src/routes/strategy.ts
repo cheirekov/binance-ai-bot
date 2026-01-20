@@ -4,32 +4,55 @@ import { z } from 'zod';
 import { placeOrder } from '../binance/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { getRiskSettings, getStrategyState, refreshStrategies } from '../services/strategyService.js';
+import { autoTradeTick } from '../services/autoTrader.js';
+import { getStrategyResponse, normalizeSymbol, refreshBestSymbol, refreshStrategies } from '../services/strategyService.js';
 
 const tradeSchema = z.object({
   side: z.enum(['BUY', 'SELL']),
   quantity: z.number().positive(),
   price: z.number().positive().optional(),
   type: z.enum(['MARKET', 'LIMIT']).default('MARKET'),
+  symbol: z.string().optional(),
+});
+
+const symbolQuerySchema = z.object({
+  symbol: z.string().optional(),
 });
 
 export async function strategyRoutes(fastify: FastifyInstance) {
-  fastify.get('/strategy', async () => {
-    const state = getStrategyState();
-    return {
-      status: state.status,
-      market: state.market,
-      balances: state.balances,
-      strategies: state.strategies,
-      risk: getRiskSettings(),
-      lastUpdated: state.lastUpdated,
-    };
+  fastify.get('/strategy', async (request, reply) => {
+    const parseResult = symbolQuerySchema.safeParse(request.query);
+    if (!parseResult.success) {
+      reply.status(400);
+      return { error: 'Invalid symbol' };
+    }
+    const symbol = parseResult.data.symbol;
+    const state = getStrategyResponse(symbol);
+    return state;
   });
 
-  fastify.post('/strategy/refresh', async () => {
-    await refreshStrategies();
-    const state = getStrategyState();
+  fastify.post('/strategy/refresh', async (request, reply) => {
+    const parseResult = symbolQuerySchema.safeParse(request.query);
+    if (!parseResult.success) {
+      reply.status(400);
+      return { error: 'Invalid symbol' };
+    }
+    const symbol = parseResult.data.symbol;
+    await refreshStrategies(symbol);
+    const state = getStrategyResponse(symbol);
     return { ok: true, state };
+  });
+
+  fastify.post('/strategy/auto-select', async (request, reply) => {
+    try {
+      const result = await refreshBestSymbol();
+      const state = getStrategyResponse(result.bestSymbol);
+      await autoTradeTick();
+      return { ok: true, state, ranked: result.candidates };
+    } catch (error) {
+      reply.status(500);
+      return { error: error instanceof Error ? error.message : 'Auto-select failed' };
+    }
   });
 
   fastify.post('/trade/execute', async (request, reply) => {
@@ -39,7 +62,20 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       return { error: parseResult.error.flatten() };
     }
     const payload = parseResult.data;
-    const orderPayload = { ...payload, symbol: config.symbol };
+    let symbol: string;
+    try {
+      symbol = normalizeSymbol(payload.symbol);
+    } catch (error) {
+      reply.status(400);
+      return { error: error instanceof Error ? error.message : 'Invalid symbol' };
+    }
+    const orderPayload = { ...payload, symbol };
+
+    const state = getStrategyResponse(symbol);
+    if (state.tradeHalted) {
+      reply.status(403);
+      return { error: 'Trading halted due to risk flags', riskFlags: state.riskFlags };
+    }
 
     if (!config.tradingEnabled) {
       return {

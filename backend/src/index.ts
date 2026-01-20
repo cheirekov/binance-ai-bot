@@ -4,6 +4,7 @@ import Fastify, { FastifyBaseLogger } from 'fastify';
 
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { backtestRoutes } from './routes/backtest.js';
 import { healthRoutes } from './routes/health.js';
 import { strategyRoutes } from './routes/strategy.js';
 import { startScheduler } from './services/scheduler.js';
@@ -24,6 +25,7 @@ const bootstrap = async () => {
   });
 
   await fastify.register(healthRoutes);
+  await fastify.register(backtestRoutes);
   await fastify.register(strategyRoutes);
 
   startScheduler();

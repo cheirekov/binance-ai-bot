@@ -139,6 +139,15 @@ h3 {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e8f0ff;
+  padding: 8px 10px;
+  border-radius: 10px;
+  min-width: 140px;
+}
+
 .status-card {
   position: relative;
   overflow: hidden;
@@ -231,6 +240,12 @@ h3 {
 .error {
   color: #ff6b6b;
   font-weight: 600;
+}
+
+.risk ul {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: #ffb347;
 }
 
 @media (max-width: 900px) {

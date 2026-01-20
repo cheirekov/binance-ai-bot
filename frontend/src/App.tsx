@@ -1,10 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { executeTrade, fetchStrategy, triggerRefresh } from './api';
+import { autoSelectSymbol, executeTrade, fetchStrategy, triggerRefresh } from './api';
 import { Balance, StrategyPlan, StrategyResponse } from './types';
 
-const formatUsd = (value: number | undefined) =>
-  value === undefined ? '—' : `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+const formatFiat = (value: number | undefined, quoteAsset: string | undefined) => {
+  if (value === undefined) return '—';
+  const currency =
+    quoteAsset && quoteAsset.toUpperCase() === 'EUR'
+      ? 'EUR'
+      : 'USD';
+  const symbol = currency === 'EUR' ? '€' : '$';
+  return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+};
 
 const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
   <div className="card">
@@ -42,7 +49,7 @@ const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
       </div>
     </div>
     {plan.aiNotes && <p className="ai-note">AI: {plan.aiNotes}</p>}
-    <p className="muted">Est. fees {formatUsd(plan.estimatedFees)}</p>
+    <p className="muted">Est. fees {formatFiat(plan.estimatedFees, undefined)}</p>
   </div>
 );
 
@@ -57,37 +64,60 @@ const BalanceRow = ({ balance }: { balance: Balance }) => (
 
 function App() {
   const [data, setData] = useState<StrategyResponse | null>(null);
+  const [selectedSymbol, setSelectedSymbol] = useState('BTCEUR');
+  const [availableSymbols, setAvailableSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
+  const riskFlags = data?.riskFlags ?? [];
 
-  const load = async () => {
+  const load = useCallback(async (symbol?: string) => {
     try {
       setLoading(true);
-      const payload = await fetchStrategy();
+      const payload = await fetchStrategy(symbol ?? selectedSymbol);
       setData(payload);
+      setSelectedSymbol(payload.symbol);
+      if (payload.availableSymbols?.length) {
+        setAvailableSymbols(payload.availableSymbols);
+      }
       setError(null);
     } catch (err) {
       setError('Unable to reach API. Check docker-compose and ports.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedSymbol]);
 
   useEffect(() => {
-    void load();
-    const interval = setInterval(load, 25000);
+    void load(selectedSymbol);
+    const interval = setInterval(() => void load(selectedSymbol), 25000);
     return () => clearInterval(interval);
-  }, []);
+  }, [load, selectedSymbol]);
 
   const onRefresh = async () => {
     setRefreshing(true);
     try {
-      const state = await triggerRefresh();
+      const state = await triggerRefresh(selectedSymbol);
       setData(state);
     } catch (err) {
       setError('Refresh failed. Try again.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const onAutoSelect = async () => {
+    setRefreshing(true);
+    try {
+      const state = await autoSelectSymbol();
+      setData(state);
+      setSelectedSymbol(state.symbol);
+      if (state.availableSymbols?.length) {
+        setAvailableSymbols(state.availableSymbols);
+      }
+    } catch (err) {
+      setError('Auto-select failed. Try again.');
     } finally {
       setRefreshing(false);
     }
@@ -105,8 +135,11 @@ function App() {
         side,
         quantity: tradeQuantity || 0.001,
         type: 'MARKET',
+        symbol: selectedSymbol,
       });
-      if (res.simulated) {
+      if (res.riskFlags) {
+        setTradeMessage(`Trade halted: ${res.riskFlags.join('; ')}`);
+      } else if (res.simulated) {
         setTradeMessage(res.note ?? 'Simulated trade; enable TRADING_ENABLED to go live.');
       } else {
         setTradeMessage('Order sent to Binance.');
@@ -117,6 +150,7 @@ function App() {
   };
 
   const market = data?.market;
+  const quote = data?.quoteAsset;
 
   return (
     <div className="page">
@@ -132,9 +166,29 @@ function App() {
             <button className="btn primary" onClick={onRefresh} disabled={refreshing}>
               {refreshing ? 'Refreshing...' : 'Refresh now'}
             </button>
-            <button className="btn ghost" onClick={() => void load()} disabled={loading}>
+            <button className="btn ghost" onClick={() => void load(selectedSymbol)} disabled={loading}>
               Sync status
             </button>
+            <button className="btn soft" onClick={onAutoSelect} disabled={refreshing}>
+              Auto-pick best
+            </button>
+          </div>
+          <div className="actions">
+            <label className="label" htmlFor="symbol-select">
+              Symbol
+            </label>
+            <select
+              id="symbol-select"
+              className="select"
+              value={selectedSymbol}
+              onChange={(e) => setSelectedSymbol(e.target.value)}
+            >
+              {(availableSymbols.length ? availableSymbols : [selectedSymbol]).map((sym) => (
+                <option key={sym} value={sym}>
+                  {sym}
+                </option>
+              ))}
+            </select>
           </div>
           {tradeMessage && <p className="muted">{tradeMessage}</p>}
           {error && <p className="error">{error}</p>}
@@ -147,11 +201,21 @@ function App() {
               ? `Updated ${new Date(data.lastUpdated).toLocaleTimeString()}`
               : 'Waiting for first tick'}
           </p>
+          {riskFlags.length > 0 && (
+            <div className="risk">
+              <p className="label">Risk flags</p>
+              <ul>
+                {riskFlags.map((flag) => (
+                  <li key={flag}>{flag}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="status-actions">
-            <button className="btn soft" onClick={() => simulateTrade('BUY')}>
+            <button className="btn soft" onClick={() => simulateTrade('BUY')} disabled={data?.tradeHalted}>
               Sim buy {tradeQuantity || '—'}
             </button>
-            <button className="btn soft" onClick={() => simulateTrade('SELL')}>
+            <button className="btn soft" onClick={() => simulateTrade('SELL')} disabled={data?.tradeHalted}>
               Sim sell {tradeQuantity || '—'}
             </button>
           </div>
@@ -163,7 +227,7 @@ function App() {
           <div className="market-card">
             <div>
               <p className="label">{market.symbol}</p>
-              <h2>{formatUsd(market.price)}</h2>
+              <h2>{formatFiat(market.price, quote)}</h2>
               <p className={market.priceChangePercent >= 0 ? 'positive' : 'negative'}>
                 {market.priceChangePercent.toFixed(2)}%
               </p>

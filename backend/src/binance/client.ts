@@ -17,7 +17,18 @@ export const get24hStats = async (symbol: string): Promise<MarketSnapshot> => {
     highPrice: Number(data.highPrice),
     lowPrice: Number(data.lowPrice),
     volume: Number(data.volume),
+    // quoteVolume gives liquidity in quote asset (USDT/USDC/EUR)
+    // Some tickers may not return it; default to 0 if missing
+    quoteVolume: data.quoteVolume ? Number(data.quoteVolume) : 0,
     updatedAt: Date.now(),
+  };
+};
+
+export const getBookTicker = async (symbol: string) => {
+  const { data } = await client.bookTicker(symbol);
+  return {
+    bid: Number(data.bidPrice),
+    ask: Number(data.askPrice),
   };
 };
 
@@ -47,6 +58,64 @@ export interface TradeParams {
   price?: number;
   type?: 'MARKET' | 'LIMIT';
 }
+
+export interface Kline {
+  openTime: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  closeTime: number;
+}
+
+export const getKlines = async (symbol: string, interval: string, limit = 200): Promise<Kline[]> => {
+  const { data } = await client.klines(symbol, interval, { limit });
+  return data.map((row: (string | number)[]) => ({
+    openTime: row[0],
+    open: Number(row[1]),
+    high: Number(row[2]),
+    low: Number(row[3]),
+    close: Number(row[4]),
+    volume: Number(row[5]),
+    closeTime: row[6],
+  }));
+};
+
+export const placeOcoOrder = async ({
+  symbol,
+  side,
+  quantity,
+  takeProfit,
+  stopLoss,
+}: {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  takeProfit: number;
+  stopLoss: number;
+}) => {
+  const stopLimitPrice = side === 'BUY' ? stopLoss * 1.001 : stopLoss * 0.999;
+  const params = {
+    symbol,
+    side,
+    quantity,
+    price: takeProfit,
+    stopPrice: stopLoss,
+    stopLimitPrice,
+    stopLimitTimeInForce: 'GTC',
+  };
+  const { data } = await client.newOCOOrder(params as {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    quantity: number;
+    price: number;
+    stopPrice: number;
+    stopLimitPrice: number;
+    stopLimitTimeInForce: string;
+  });
+  return data;
+};
 
 export const placeOrder = async (params: TradeParams) => {
   if (!config.tradingEnabled) {

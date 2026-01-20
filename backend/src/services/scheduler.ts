@@ -1,12 +1,18 @@
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { refreshStrategies } from './strategyService.js';
+import { autoTradeTick } from './autoTrader.js';
+import { refreshBestSymbol, refreshStrategies } from './strategyService.js';
 
 let timer: NodeJS.Timeout | null = null;
 
 const runOnce = async () => {
   try {
-    await refreshStrategies();
+    if (config.autoSelectSymbol) {
+      await refreshBestSymbol();
+    } else {
+      await refreshStrategies(config.defaultSymbol);
+    }
+    await autoTradeTick();
   } catch (error) {
     logger.warn({ err: error }, 'Scheduled refresh failed');
   }

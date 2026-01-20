@@ -1,10 +1,10 @@
 import { FastifyInstance } from 'fastify';
 
-import { getStrategyState } from '../services/strategyService.js';
+import { getStrategyResponse } from '../services/strategyService.js';
 
 export async function healthRoutes(fastify: FastifyInstance) {
   fastify.get('/health', async () => {
-    const state = getStrategyState();
+    const state = getStrategyResponse();
     return {
       status: 'ok',
       strategyStatus: state.status,
