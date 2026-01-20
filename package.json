@@ -1,0 +1,19 @@
+{
+  "name": "binance-ai-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous Binance trading assistant with OpenAI-powered strategy generation and web UI.",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "format": "npm run format --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=18.18"
+  }
+}

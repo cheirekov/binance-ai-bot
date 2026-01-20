@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+.env
+.env.local
+package-lock.json.LOCK
+
+# Editors
+.idea
+.vscode

@@ -1,0 +1,240 @@
+:root {
+  font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  color: #e8f0ff;
+  background-color: #050814;
+  line-height: 1.5;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 20% 20%, rgba(0, 206, 201, 0.15), transparent 35%),
+    radial-gradient(circle at 80% 0%, rgba(255, 105, 180, 0.12), transparent 30%),
+    linear-gradient(135deg, #0a1024 0%, #0a0d1a 40%, #04060f 100%);
+  color: #e8f0ff;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 22px 80px;
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 20px;
+  align-items: center;
+  margin-bottom: 24px;
+}
+
+.status-card,
+.card,
+.market-card {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 18px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 25px 60px rgba(0, 0, 0, 0.35);
+}
+
+h1 {
+  margin: 8px 0 12px;
+  line-height: 1.2;
+  font-size: clamp(28px, 3vw, 40px);
+}
+
+h2 {
+  margin: 0;
+  font-size: 28px;
+}
+
+h3 {
+  margin: 4px 0 10px;
+}
+
+.eyebrow {
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: #8dd9ff;
+  font-size: 12px;
+}
+
+.muted {
+  color: #a6b3cb;
+  margin: 4px 0;
+}
+
+.label {
+  color: #8dd9ff;
+  margin: 0 0 6px;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+}
+
+.value {
+  margin: 0;
+  font-weight: 600;
+}
+
+.positive {
+  color: #0fe0b1;
+  font-weight: 700;
+}
+
+.negative {
+  color: #ff6b6b;
+  font-weight: 700;
+}
+
+.actions,
+.status-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.btn {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: transparent;
+  color: #e8f0ff;
+  padding: 10px 14px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn.primary {
+  background: linear-gradient(120deg, #12c2e9, #0ed2f7);
+  color: #050814;
+  border: none;
+}
+
+.btn.ghost {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.btn.soft {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.status-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.status-card::after {
+  content: '';
+  position: absolute;
+  inset: -20px -60px auto auto;
+  width: 140px;
+  height: 140px;
+  background: radial-gradient(circle, rgba(18, 194, 233, 0.35), transparent 60%);
+  transform: rotate(-20deg);
+}
+
+.market {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.market-card .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.strategies {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 8px 0 12px;
+}
+
+.signals {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.signals li {
+  background: rgba(255, 255, 255, 0.07);
+  padding: 6px 8px;
+  border-radius: 8px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.chip {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.ai-note {
+  background: rgba(18, 194, 233, 0.12);
+  border-left: 3px solid #12c2e9;
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.balance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.balance-row {
+  display: flex;
+  justify-content: space-between;
+}
+
+.error {
+  color: #ff6b6b;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+}
