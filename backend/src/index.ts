@@ -24,6 +24,15 @@ const bootstrap = async () => {
     timeWindow: '10 seconds',
   });
 
+  fastify.addHook('preHandler', async (request, reply) => {
+    if (!config.apiKey) return;
+    const provided = request.headers['x-api-key'] as string | undefined;
+    if (provided !== config.apiKey) {
+      reply.code(401);
+      throw new Error('Unauthorized');
+    }
+  });
+
   await fastify.register(healthRoutes);
   await fastify.register(backtestRoutes);
   await fastify.register(strategyRoutes);

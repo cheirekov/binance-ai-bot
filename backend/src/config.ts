@@ -60,6 +60,8 @@ export const config = {
   dailyLossCapPct: numberFromEnv(process.env.DAILY_LOSS_CAP_PCT, 3),
   slippageBps: numberFromEnv(process.env.SLIPPAGE_BPS, 8),
   ocoEnabled: (process.env.OCO_ENABLED ?? 'true').toLowerCase() === 'true',
+  apiKey: process.env.API_KEY ?? '',
+  clientKey: process.env.CLIENT_KEY ?? '',
 };
 
 export const feeRate = {

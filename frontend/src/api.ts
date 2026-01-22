@@ -5,6 +5,7 @@ import { StrategyResponse } from './types';
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8788',
   timeout: 10000,
+  headers: import.meta.env.VITE_CLIENT_KEY ? { 'x-api-key': import.meta.env.VITE_CLIENT_KEY } : {},
 });
 
 export const fetchStrategy = async (symbol?: string) => {
