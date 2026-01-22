@@ -19,6 +19,8 @@ services:
       args:
         VITE_API_URL: ${VITE_API_URL:-http://api:8788}
         VITE_CLIENT_KEY: ${VITE_CLIENT_KEY:-}
+        BASIC_AUTH_USER: ${BASIC_AUTH_USER:-bot}
+        BASIC_AUTH_PASS: ${BASIC_AUTH_PASS:-botpass}
     depends_on:
       - api
     ports:

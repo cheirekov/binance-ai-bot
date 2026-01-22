@@ -9,7 +9,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
 
 ## Quick start (local)
-1) Copy env: `cp .env.example .env` and fill `BINANCE_API_KEY/SECRET` (use restricted keys) and `OPENAI_API_KEY`. Keep `TRADING_ENABLED=false` until ready. Default symbol is `BTCEUR`; set `ALLOWED_SYMBOLS` to the pairs you want (e.g., `BTCEUR,ETHEUR,BTCUSDT,ETHUSDT,BTCUSDC`). `AUTO_SELECT_SYMBOL=true` will score allowed symbols and pick the strongest on refresh.
+1) Copy env: `cp .env.example .env` and fill `BINANCE_API_KEY/SECRET` (use restricted keys) and `OPENAI_API_KEY`. Keep `TRADING_ENABLED=false` until ready. Default symbol is `BTCEUR`; set `ALLOWED_SYMBOLS` and `ALLOWED_QUOTES` to what you can trade (e.g., EU: `ALLOWED_QUOTES=USDC,EUR` and symbols `BTCUSDC,ETHUSDC,...`). `AUTO_SELECT_SYMBOL=true` will score allowed symbols and pick the strongest on refresh. If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.
 3) Start API: `npm run dev --workspace backend` (listens on `8788`).
 4) Start web: `npm run dev --workspace frontend` (opens on `4173`, expects API at `http://localhost:8788`).
@@ -22,6 +22,10 @@ docker-compose up --build
 ```
 - API: `http://localhost:8788`
 - Web UI: `http://localhost:4173`
+
+Security:
+- API requires `x-api-key` when `API_KEY` is set.
+- UI is protected with HTTP basic auth when `BASIC_AUTH_USER/PASS` are set; Docker build consumes these via build args.
 
 `VITE_API_URL` can be overridden to point the frontend at a remote API. In Compose it defaults to `http://api:8788`.  
 To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.vision` and use testnet keys; live trading still respects `TRADING_ENABLED`.
