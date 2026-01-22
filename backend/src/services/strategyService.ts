@@ -26,7 +26,12 @@ export const normalizeSymbol = (symbol?: string) => {
   if (!/^[A-Z0-9]{5,15}$/.test(normalized)) {
     throw new Error('Invalid symbol format');
   }
-  if (config.allowedSymbols.length > 0 && !config.allowedSymbols.includes(normalized)) {
+  // Allowed list acts as a block list only when non-empty and symbol not discovered
+  if (
+    config.allowedSymbols.length > 0 &&
+    !config.allowedSymbols.includes(normalized) &&
+    !stateBySymbol[normalized]
+  ) {
     throw new Error(`Symbol ${normalized} not allowed. Update ALLOWED_SYMBOLS to include it.`);
   }
   return normalized;
@@ -137,8 +142,11 @@ const scoreSnapshot = (snapshot: {
   return momentumScore + liquidityScore + volPenalty + spreadPenalty;
 };
 
+const looksLeverageToken = (symbol: string) => /(UP|DOWN|BULL|BEAR)$/.test(symbol);
+
 export const refreshBestSymbol = async () => {
-  let symbols = config.allowedSymbols.length ? config.allowedSymbols : [config.defaultSymbol];
+  const baseSymbols = config.allowedSymbols.length ? config.allowedSymbols : [config.defaultSymbol];
+  let symbols = [...baseSymbols];
 
   if (config.autoDiscoverSymbols) {
     try {
@@ -147,13 +155,24 @@ export const refreshBestSymbol = async () => {
         .filter(
           (s) =>
             s.status === 'TRADING' &&
+            (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
             config.allowedQuoteAssets.includes(s.quoteAsset.toUpperCase()) &&
-            !config.blacklistSymbols.includes(s.symbol.toUpperCase()),
+            !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
+            !looksLeverageToken(s.symbol),
         )
         .map((s) => s.symbol);
+      // merge configured list to ensure explicit allow-list stays
+      symbols = Array.from(new Set([...symbols, ...baseSymbols]));
+      // keep it bounded
+      symbols = symbols.slice(0, 100);
     } catch (error) {
       logger.warn({ err: error }, 'Auto-discover failed; falling back to configured symbols');
     }
+  }
+
+  // fallback if discovery returned nothing
+  if (!symbols.length) {
+    symbols = baseSymbols;
   }
 
   const candidates: { symbol: string; score: number }[] = [];
@@ -167,12 +186,16 @@ export const refreshBestSymbol = async () => {
         const mid = (book.bid + book.ask) / 2;
         spreadPct = ((book.ask - book.bid) / mid) * 100;
       } catch (error) {
-        logger.warn({ err: error, symbol }, 'Book ticker failed; skipping spread penalty');
+        logger.warn({ symbol, reason: 'book_ticker_failed' }, 'Skipping spread penalty');
       }
       const score = scoreSnapshot({ ...snap, spreadPct });
       candidates.push({ symbol, score });
-    } catch (error) {
-      logger.warn({ err: error, symbol }, 'Skipping symbol during auto-select');
+    } catch (error: unknown) {
+      const errObj = error as { code?: string; message?: string };
+      logger.warn(
+        { symbol, code: errObj?.code, msg: errObj?.message },
+        'Skipping symbol during auto-select',
+      );
     }
   }
 

@@ -58,6 +58,23 @@ export const autoTradeTick = async () => {
   const chosenHorizon = selectHorizon();
   const plan = strategies[chosenHorizon];
   const entry = plan.entries[0];
+  const positionKey = `${state.symbol}:${chosenHorizon}`;
+
+  const openPosition = persisted.positions[positionKey];
+  if (openPosition && state.market) {
+    const markPnlPct =
+      openPosition.side === 'BUY'
+        ? (state.market.price - openPosition.entryPrice) / openPosition.entryPrice
+        : (openPosition.entryPrice - state.market.price) / openPosition.entryPrice;
+    const markPnlPct100 = markPnlPct * 100;
+    if (markPnlPct100 <= -config.dailyLossCapPct) {
+      logger.warn(
+        { markPnlPct: markPnlPct100.toFixed(2) },
+        'Auto-trade halted by daily loss cap',
+      );
+      return;
+    }
+  }
 
   if (entry.confidence < config.autoTradeMinConfidence) {
     logger.info(
@@ -114,19 +131,3 @@ export const autoTradeTick = async () => {
     logger.error({ err: error }, 'Auto-trade failed');
   }
 };
-  const positionKey = `${state.symbol}:${config.autoTradeHorizon}`;
-  const openPosition = persisted.positions[positionKey];
-  if (openPosition && state.market) {
-    const markPnlPct =
-      openPosition.side === 'BUY'
-        ? (state.market.price - openPosition.entryPrice) / openPosition.entryPrice
-        : (openPosition.entryPrice - state.market.price) / openPosition.entryPrice;
-    const markPnlPct100 = markPnlPct * 100;
-    if (markPnlPct100 <= -config.dailyLossCapPct) {
-      logger.warn(
-        { markPnlPct: markPnlPct100.toFixed(2) },
-        'Auto-trade halted by daily loss cap',
-      );
-      return;
-    }
-  }

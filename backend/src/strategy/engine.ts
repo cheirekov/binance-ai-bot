@@ -1,5 +1,5 @@
-import { generateAiInsight } from '../openai/strategist.js';
 import { config } from '../config.js';
+import { generateAiInsight } from '../openai/strategist.js';
 import { Horizon, MarketSnapshot, RiskSettings, Side, StrategyBundle, StrategyPlan } from '../types.js';
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);

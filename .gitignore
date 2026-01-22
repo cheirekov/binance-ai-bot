@@ -10,3 +10,4 @@ package-lock.json.LOCK
 # Editors
 .idea
 .vscode
+state.json

@@ -12,17 +12,28 @@ export interface SymbolInfo {
   baseAsset: string;
   quoteAsset: string;
   status: string;
+  isSpotTradingAllowed?: boolean;
+  permissions?: string[];
 }
 
 export const fetchTradableSymbols = async (): Promise<SymbolInfo[]> => {
   try {
     const { data } = await client.exchangeInfo();
     return data.symbols.map(
-      (s: { symbol: string; baseAsset: string; quoteAsset: string; status: string }) => ({
+      (s: {
+        symbol: string;
+        baseAsset: string;
+        quoteAsset: string;
+        status: string;
+        isSpotTradingAllowed?: boolean;
+        permissions?: string[];
+      }) => ({
         symbol: s.symbol,
         baseAsset: s.baseAsset,
         quoteAsset: s.quoteAsset,
         status: s.status,
+        isSpotTradingAllowed: s.isSpotTradingAllowed,
+        permissions: s.permissions,
       }),
     );
   } catch (error) {
