@@ -18,6 +18,7 @@ services:
       dockerfile: Dockerfile.web
       args:
         VITE_API_URL: ${VITE_API_URL:-http://api:8788}
+        VITE_CLIENT_KEY: ${VITE_CLIENT_KEY:-}
     depends_on:
       - api
     ports:
