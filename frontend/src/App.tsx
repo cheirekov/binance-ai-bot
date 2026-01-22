@@ -3,14 +3,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { autoSelectSymbol, executeTrade, fetchStrategy, triggerRefresh } from './api';
 import { Balance, StrategyPlan, StrategyResponse } from './types';
 
-const formatFiat = (value: number | undefined, quoteAsset: string | undefined) => {
+const formatPrice = (value: number | undefined, quoteAsset: string | undefined, digits = 8) => {
   if (value === undefined) return '—';
-  const currency =
-    quoteAsset && quoteAsset.toUpperCase() === 'EUR'
-      ? 'EUR'
-      : 'USD';
-  const symbol = currency === 'EUR' ? '€' : '$';
-  return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  const qa = quoteAsset?.toUpperCase();
+  const fiatQuotes = ['USD', 'USDT', 'USDC', 'EUR', 'BUSD'];
+  if (qa && fiatQuotes.includes(qa)) {
+    const currency = qa === 'EUR' ? 'EUR' : 'USD';
+    const symbol = currency === 'EUR' ? '€' : '$';
+    return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  }
+  return `${value.toFixed(digits)} ${qa ?? ''}`.trim();
 };
 
 const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
@@ -26,7 +28,7 @@ const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
       <div>
         <p className="label">Entry</p>
         <p className="value">
-          {plan.entries[0].side} @ {plan.entries[0].priceTarget.toFixed(2)}
+          {plan.entries[0].side} @ {plan.entries[0].priceTarget.toFixed(6)}
         </p>
         <p className="muted">
           Size {plan.entries[0].size.toFixed(4)} | Confidence {(plan.entries[0].confidence * 100).toFixed(0)}%
@@ -34,9 +36,9 @@ const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
       </div>
       <div>
         <p className="label">Stops/Targets</p>
-        <p className="value">SL {plan.exitPlan.stopLoss.toFixed(2)}</p>
+        <p className="value">SL {plan.exitPlan.stopLoss.toFixed(6)}</p>
         <p className="muted">
-          TP {plan.exitPlan.takeProfit.map((tp) => tp.toFixed(2)).join(' / ')} · {plan.exitPlan.timeframeMinutes}m
+          TP {plan.exitPlan.takeProfit.map((tp) => tp.toFixed(6)).join(' / ')} · {plan.exitPlan.timeframeMinutes}m
         </p>
       </div>
       <div>
@@ -49,7 +51,7 @@ const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
       </div>
     </div>
     {plan.aiNotes && <p className="ai-note">AI: {plan.aiNotes}</p>}
-    <p className="muted">Est. fees {formatFiat(plan.estimatedFees, undefined)}</p>
+    <p className="muted">Est. fees {plan.estimatedFees.toFixed(4)}</p>
   </div>
 );
 
@@ -227,7 +229,7 @@ function App() {
           <div className="market-card">
             <div>
               <p className="label">{market.symbol}</p>
-              <h2>{formatFiat(market.price, quote)}</h2>
+              <h2>{formatPrice(market.price, quote)}</h2>
               <p className={market.priceChangePercent >= 0 ? 'positive' : 'negative'}>
                 {market.priceChangePercent.toFixed(2)}%
               </p>
