@@ -8,7 +8,8 @@ const numberFromEnv = (value: string | undefined, fallback: number): number => {
 };
 
 const listFromEnv = (value: string | undefined, fallback: string[]): string[] => {
-  if (!value) return fallback;
+  if (value === undefined) return fallback;
+  if (value.trim() === '') return [];
   return value
     .split(',')
     .map((v) => v.trim().toUpperCase())
@@ -38,6 +39,7 @@ export const config = {
     'BNBUSDT',
   ]),
   allowedQuoteAssets: listFromEnv(process.env.ALLOWED_QUOTES, ['USDT', 'USDC', 'EUR']),
+  universeMaxSymbols: numberFromEnv(process.env.UNIVERSE_MAX_SYMBOLS, 50),
   maxPositionSizeUsdt: numberFromEnv(process.env.MAX_POSITION_SIZE_USDT, 200),
   riskPerTradeBasisPoints: numberFromEnv(process.env.RISK_PER_TRADE_BP, 50),
   refreshSeconds: numberFromEnv(process.env.REFRESH_SECONDS, 30),

@@ -178,7 +178,9 @@ export const refreshBestSymbol = async () => {
   const baseSymbols = config.allowedSymbols.length ? config.allowedSymbols : [config.defaultSymbol];
   let symbols = [...baseSymbols];
 
-  if (config.autoDiscoverSymbols) {
+  // If the user provided an explicit allow-list, treat it as the universe for auto-select.
+  // Auto-discovery is only used to validate/filter tradable SPOT symbols, not to expand the list.
+  if (config.autoDiscoverSymbols && config.allowedSymbols.length === 0) {
     try {
       const exchangeSymbols = await fetchTradableSymbols();
       symbols = exchangeSymbols
@@ -191,12 +193,26 @@ export const refreshBestSymbol = async () => {
             !looksLeverageToken(s.symbol),
         )
         .map((s) => s.symbol);
-      // merge configured list to ensure explicit allow-list stays
-      symbols = Array.from(new Set([...symbols, ...baseSymbols]));
-      // keep it bounded
-      symbols = symbols.slice(0, 100);
     } catch (error) {
       logger.warn({ err: error }, 'Auto-discover failed; falling back to configured symbols');
+    }
+  } else if (config.autoDiscoverSymbols && config.allowedSymbols.length > 0) {
+    try {
+      const exchangeSymbols = await fetchTradableSymbols();
+      const tradable = new Set(
+        exchangeSymbols
+          .filter(
+            (s) =>
+              s.status === 'TRADING' &&
+              (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
+              !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
+              !looksLeverageToken(s.symbol),
+          )
+          .map((s) => s.symbol.toUpperCase()),
+      );
+      symbols = baseSymbols.filter((s) => tradable.has(s.toUpperCase()));
+    } catch (error) {
+      logger.warn({ err: error }, 'Auto-discover validation failed; using configured symbols as-is');
     }
   }
 
@@ -204,6 +220,9 @@ export const refreshBestSymbol = async () => {
   if (!symbols.length) {
     symbols = baseSymbols;
   }
+
+  // keep it bounded
+  symbols = symbols.slice(0, config.universeMaxSymbols);
 
   const candidates: { symbol: string; score: number }[] = [];
 

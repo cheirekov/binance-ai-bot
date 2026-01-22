@@ -81,11 +81,20 @@ function App() {
       setData(payload);
       setSelectedSymbol(payload.symbol);
       if (payload.availableSymbols?.length) {
-        setAvailableSymbols(payload.availableSymbols);
+        const merged = payload.availableSymbols.includes(payload.symbol)
+          ? payload.availableSymbols
+          : [payload.symbol, ...payload.availableSymbols];
+        setAvailableSymbols(merged);
       }
       setError(null);
     } catch (err) {
-      setError('Unable to reach API. Check docker-compose and ports.');
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `API error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'Unable to reach API. Check docker-compose and ports.';
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -103,7 +112,13 @@ function App() {
       const state = await triggerRefresh(selectedSymbol);
       setData(state);
     } catch (err) {
-      setError('Refresh failed. Try again.');
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `Refresh error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'Refresh failed. Try again.';
+      setError(message);
     } finally {
       setRefreshing(false);
     }
@@ -116,10 +131,19 @@ function App() {
       setData(state);
       setSelectedSymbol(state.symbol);
       if (state.availableSymbols?.length) {
-        setAvailableSymbols(state.availableSymbols);
+        const merged = state.availableSymbols.includes(state.symbol)
+          ? state.availableSymbols
+          : [state.symbol, ...state.availableSymbols];
+        setAvailableSymbols(merged);
       }
     } catch (err) {
-      setError('Auto-select failed. Try again.');
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `Auto-select error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'Auto-select failed. Try again.';
+      setError(message);
     } finally {
       setRefreshing(false);
     }
@@ -152,7 +176,7 @@ function App() {
   };
 
   const market = data?.market;
-  const quote = data?.quoteAsset;
+  const quote = market?.quoteAsset ?? data?.quoteAsset;
 
   return (
     <div className="page">
@@ -274,7 +298,13 @@ function App() {
             { key: 'long', plan: data.strategies.long },
           ].map(({ key, plan }) => <StrategyCard key={key} plan={plan} />)
         ) : (
-          <p className="muted">Strategy engine warming up...</p>
+          <p className="muted">
+            {data?.status === 'refreshing'
+              ? 'Refreshing strategy...'
+              : data?.status === 'error'
+                ? `Refresh failed: ${data.error ?? 'Unknown error'}`
+                : `No strategy yet for ${selectedSymbol}. Waiting for first refresh...`}
+          </p>
         )}
       </div>
     </div>

@@ -28,6 +28,12 @@ export async function strategyRoutes(fastify: FastifyInstance) {
     }
     const symbol = parseResult.data.symbol;
     const state = getStrategyResponse(symbol);
+    if (state.status === 'idle' || !state.strategies) {
+      void refreshStrategies(state.symbol).catch((error) => {
+        logger.warn({ err: error, symbol: state.symbol }, 'Background refresh failed');
+      });
+      return getStrategyResponse(state.symbol);
+    }
     return state;
   });
 
@@ -38,9 +44,11 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       return { error: 'Invalid symbol' };
     }
     const symbol = parseResult.data.symbol;
-    await refreshStrategies(symbol);
     const state = getStrategyResponse(symbol);
-    return { ok: true, state };
+    void refreshStrategies(state.symbol).catch((error) => {
+      logger.warn({ err: error, symbol: state.symbol }, 'Manual refresh failed');
+    });
+    return { ok: true, state: getStrategyResponse(state.symbol) };
   });
 
   fastify.post('/strategy/auto-select', async (request, reply) => {
