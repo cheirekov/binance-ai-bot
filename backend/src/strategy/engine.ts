@@ -34,6 +34,7 @@ const buildHeuristicPlan = (
   risk: RiskSettings,
   aiNotes: string,
   newsSentiment: number,
+  quoteUsd: number,
 ): StrategyPlan => {
   const side = pickSide(market.priceChangePercent);
   const volatility = (market.highPrice - market.lowPrice) / market.price;
@@ -53,11 +54,11 @@ const buildHeuristicPlan = (
       ? [market.price * (1 + takeProfitStep), market.price * (1 + takeProfitStep * 1.4)]
       : [market.price * (1 - takeProfitStep), market.price * (1 - takeProfitStep * 1.4)];
 
-  const capitalAtRisk = risk.maxPositionSizeUsdt * risk.riskPerTradeFraction;
-  const riskPerUnit = stopDistance * market.price;
-  const rawSize = riskPerUnit > 0 ? capitalAtRisk / riskPerUnit : 0;
+  const capitalAtRiskUsd = risk.maxPositionSizeUsdt * risk.riskPerTradeFraction;
+  const riskPerUnitUsd = stopDistance * market.price * Math.max(quoteUsd, 0.0001);
+  const rawSize = riskPerUnitUsd > 0 ? capitalAtRiskUsd / riskPerUnitUsd : 0;
   const slippageFactor = Math.max(0, 1 - config.slippageBps / 10000);
-  const size = clamp(rawSize * slippageFactor, 0, risk.maxPositionSizeUsdt / market.price);
+  const size = clamp(rawSize * slippageFactor, 0, risk.maxPositionSizeUsdt / Math.max(market.price, 0.0001));
   const feeEstimate = size * market.price * (risk.feeRate.taker * 2);
 
   return {
@@ -95,14 +96,15 @@ export const buildStrategyBundle = async (
   market: MarketSnapshot,
   risk: RiskSettings,
   newsSentiment: number,
+  quoteUsd: number,
 ): Promise<StrategyBundle> => {
   const aiShort = await generateAiInsight({ horizon: 'short', market, risk });
   const aiMedium = await generateAiInsight({ horizon: 'medium', market, risk });
   const aiLong = await generateAiInsight({ horizon: 'long', market, risk });
 
   return {
-    short: buildHeuristicPlan('short', market, risk, aiShort.rationale, newsSentiment),
-    medium: buildHeuristicPlan('medium', market, risk, aiMedium.rationale, newsSentiment),
-    long: buildHeuristicPlan('long', market, risk, aiLong.rationale, newsSentiment),
+    short: buildHeuristicPlan('short', market, risk, aiShort.rationale, newsSentiment, quoteUsd),
+    medium: buildHeuristicPlan('medium', market, risk, aiMedium.rationale, newsSentiment, quoteUsd),
+    long: buildHeuristicPlan('long', market, risk, aiLong.rationale, newsSentiment, quoteUsd),
   };
 };

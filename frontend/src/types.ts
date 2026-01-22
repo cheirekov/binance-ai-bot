@@ -8,6 +8,7 @@ export interface MarketSnapshot {
   lowPrice: number;
   volume: number;
   updatedAt: number;
+  quoteAsset?: string;
 }
 
 export interface Balance {
@@ -54,10 +55,10 @@ export interface StrategyResponse {
     riskPerTradeFraction: number;
     feeRate: { maker: number; taker: number };
   };
-  quoteAsset: string;
   availableSymbols: string[];
   lastUpdated: number | null;
   error?: string;
   riskFlags?: string[];
   tradeHalted?: boolean;
+  quoteAsset?: string;
 }

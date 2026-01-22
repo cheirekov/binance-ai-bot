@@ -29,7 +29,7 @@ const risk: RiskSettings = {
 
 describe('buildStrategyBundle', () => {
   it('creates strategies for all horizons with AI notes', async () => {
-    const bundle = await buildStrategyBundle(mockMarket, risk);
+    const bundle = await buildStrategyBundle(mockMarket, risk, 0.5, 1);
 
     expect(bundle.short.horizon).toBe('short');
     expect(bundle.medium.horizon).toBe('medium');

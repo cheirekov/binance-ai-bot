@@ -82,7 +82,7 @@ export async function backtestRoutes(fastify: FastifyInstance) {
       feeRate,
     };
 
-    const bundle = await buildStrategyBundle(snapshot, risk, 0);
+    const bundle = await buildStrategyBundle(snapshot, risk, 0, 1);
     const plan = bundle.short; // use short-term plan for backtest
 
     const sim = simulatePlan(

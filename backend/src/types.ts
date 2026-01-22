@@ -11,6 +11,7 @@ export interface MarketSnapshot {
   volume: number;
   quoteVolume?: number;
   updatedAt: number;
+  quoteAsset?: string;
 }
 
 export interface Balance {

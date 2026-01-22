@@ -15,6 +15,7 @@ const riskSettings: RiskSettings = {
 
 const stateBySymbol: Record<string, StrategyState> = {};
 const persisted = loadState();
+const quoteUsdCache: Record<string, number> = {};
 
 const cacheBalances = async (): Promise<Balance[]> => {
   const balances = await getBalances();
@@ -35,6 +36,14 @@ export const normalizeSymbol = (symbol?: string) => {
     throw new Error(`Symbol ${normalized} not allowed. Update ALLOWED_SYMBOLS to include it.`);
   }
   return normalized;
+};
+
+const deriveQuoteAsset = (symbol: string): string => {
+  const candidates = [...config.allowedQuoteAssets, 'BTC', 'BNB', 'ETH'];
+  const match = candidates.find((q) => symbol.endsWith(q));
+  if (match) return match;
+  // fallback: last 3 characters
+  return symbol.slice(-3);
 };
 
 const ensureState = (symbol: string): StrategyState => {
@@ -74,25 +83,46 @@ export const refreshStrategies = async (symbolInput?: string) => {
   try {
     const news = await getNewsSentiment();
     const market = await get24hStats(symbol);
+    market.quoteAsset = deriveQuoteAsset(symbol);
+    // compute quote USD conversion for BTC/ETH/BNB
+    if (market.quoteAsset && ['BTC', 'ETH', 'BNB'].includes(market.quoteAsset)) {
+      const key = market.quoteAsset;
+      if (!quoteUsdCache[key] || Date.now() - (quoteUsdCache as unknown as Record<string, number>)[`${key}_ts`] > 60_000) {
+        const refSymbol = `${key}USDC`;
+        try {
+          const ref = await get24hStats(refSymbol);
+          quoteUsdCache[key] = ref.price;
+          (quoteUsdCache as unknown as Record<string, number>)[`${key}_ts`] = Date.now();
+        } catch {
+          quoteUsdCache[key] = 1;
+          (quoteUsdCache as unknown as Record<string, number>)[`${key}_ts`] = Date.now();
+        }
+      }
+    }
     state.market = market;
 
     const balances = await cacheBalances();
     state.balances = balances;
     const volatilityPct = Math.abs((market.highPrice - market.lowPrice) / market.price) * 100;
     const quoteVol = market.quoteVolume ?? 0;
+    const quoteAsset = market.quoteAsset ?? config.quoteAsset;
 
     if (volatilityPct > config.maxVolatilityPercent) {
       state.riskFlags.push(`Volatility ${volatilityPct.toFixed(2)}% exceeds cap ${config.maxVolatilityPercent}%`);
     }
-    if (quoteVol < config.minQuoteVolume) {
-      state.riskFlags.push(
-        `Quote volume ${quoteVol.toLocaleString()} below floor ${config.minQuoteVolume.toLocaleString()}`,
-      );
+    const stableQuotes = ['USDT', 'USDC', 'USD', 'EUR', 'BUSD'];
+    if (stableQuotes.includes(quoteAsset)) {
+      if (quoteVol < config.minQuoteVolume) {
+        state.riskFlags.push(
+          `Quote volume ${quoteVol.toLocaleString()} below floor ${config.minQuoteVolume.toLocaleString()}`,
+        );
+      }
     }
 
     state.tradeHalted = state.riskFlags.length > 0;
 
-    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment);
+    const quoteUsd = market.quoteAsset && quoteUsdCache[market.quoteAsset] ? quoteUsdCache[market.quoteAsset] : 1;
+    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment, quoteUsd);
     state.lastUpdated = Date.now();
     state.status = 'ready';
     const snapshot = getStrategyResponse(symbol);
