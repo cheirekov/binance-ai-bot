@@ -1,133 +1,651 @@
-import { placeOcoOrder, placeOrder } from '../binance/client.js';
+import { cancelOcoOrder, get24hStats, placeOcoOrder, placeOrder } from '../binance/client.js';
+import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { loadState, persistLastTrade, persistPosition } from './persistence.js';
-import { getStrategyResponse } from './strategyService.js';
+import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
+import { getNewsSentiment } from './newsService.js';
+import { getStrategyResponse, refreshStrategies } from './strategyService.js';
+import { Balance, PersistedPayload } from '../types.js';
 
-const persisted = loadState();
+const persisted = getPersistedState();
 
-export const autoTradeTick = async () => {
-  if (!config.autoTradeEnabled) return;
-  if (!config.tradingEnabled) {
-    logger.warn('Auto-trade enabled but TRADING_ENABLED=false; skipping');
-    return;
+type SymbolInfo = Awaited<ReturnType<typeof fetchTradableSymbols>>[number];
+type Position = PersistedPayload['positions'][string];
+
+const recordDecision = (decision: NonNullable<PersistedPayload['meta']>['lastAutoTrade']) => {
+  persistMeta(persisted, { lastAutoTrade: decision });
+};
+
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
+const bumpConversionCounter = () => {
+  const now = Date.now();
+  const nextDate = todayKey();
+  const current = persisted.meta?.conversions;
+  const next =
+    current && current.date === nextDate
+      ? { date: nextDate, count: current.count + 1, lastAt: now }
+      : { date: nextDate, count: 1, lastAt: now };
+  persistMeta(persisted, { conversions: next });
+};
+
+const balanceMap = (balances: Balance[]) =>
+  new Map(balances.map((b) => [b.asset.toUpperCase(), b.free]));
+
+const findSymbolInfo = (symbols: SymbolInfo[], symbol: string) =>
+  symbols.find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
+
+const findConversion = (symbols: SymbolInfo[], fromAsset: string, toAsset: string) => {
+  const from = fromAsset.toUpperCase();
+  const to = toAsset.toUpperCase();
+  const direct = symbols.find(
+    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === to && s.quoteAsset.toUpperCase() === from,
+  );
+  if (direct) return { symbol: direct.symbol.toUpperCase(), side: 'BUY' as const };
+  const inverse = symbols.find(
+    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === from && s.quoteAsset.toUpperCase() === to,
+  );
+  if (inverse) return { symbol: inverse.symbol.toUpperCase(), side: 'SELL' as const };
+  return null;
+};
+
+const getAssetToHomeRate = async (symbols: SymbolInfo[], asset: string, homeAsset: string): Promise<number | null> => {
+  const assetUp = asset.toUpperCase();
+  const homeUp = homeAsset.toUpperCase();
+  if (assetUp === homeUp) return 1;
+  const direct = symbols.find(
+    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === assetUp && s.quoteAsset.toUpperCase() === homeUp,
+  );
+  if (direct) {
+    const snap = await get24hStats(direct.symbol);
+    return snap.price;
+  }
+  const inverse = symbols.find(
+    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === homeUp && s.quoteAsset.toUpperCase() === assetUp,
+  );
+  if (inverse) {
+    const snap = await get24hStats(inverse.symbol);
+    return snap.price > 0 ? 1 / snap.price : null;
+  }
+  return null;
+};
+
+const ensureQuoteAsset = async (
+  symbols: SymbolInfo[],
+  balances: Balance[],
+  homeAsset: string,
+  quoteAsset: string,
+  requiredQuote: number,
+): Promise<{ balances: Balance[]; note?: string }> => {
+  const home = homeAsset.toUpperCase();
+  const quote = quoteAsset.toUpperCase();
+  if (quote === home) return { balances };
+
+  if (!config.conversionEnabled) {
+    return { balances, note: `Conversions disabled; need ${quote}` };
   }
 
-  const state = getStrategyResponse();
+  const freeBy = balanceMap(balances);
+  const freeQuote = freeBy.get(quote) ?? 0;
+  if (freeQuote >= requiredQuote) return { balances };
 
-  if (state.tradeHalted) {
-    logger.info({ riskFlags: state.riskFlags }, 'Auto-trade blocked by risk flags');
-    return;
-  }
-  const strategies = state.strategies;
-  if (!strategies) {
-    logger.info('Auto-trade skipped: no strategies yet');
-    return;
+  const conversion = findConversion(symbols, home, quote);
+  if (!conversion) {
+    return { balances, note: `No conversion path ${home}->${quote}` };
   }
 
-  const volPct =
-    state.market && state.market.highPrice && state.market.lowPrice && state.market.price
-      ? Math.abs((state.market.highPrice - state.market.lowPrice) / state.market.price) * 100
-      : 0;
+  const missing = requiredQuote - freeQuote;
+  if (missing <= 0) return { balances };
 
-  const selectHorizon = () => {
-    const candidates: { h: 'short' | 'medium' | 'long'; score: number }[] = [];
-    (['short', 'medium', 'long'] as const).forEach((h) => {
-      const plan = strategies[h];
-      if (!plan) return;
-      const entry = plan.entries[0];
-      let score = entry.confidence; // 0-1
-      score += plan.riskRewardRatio / 10; // modest boost for higher RR
-      if (h === 'short' && volPct > 8) score += 0.1;
-      if (h === 'medium' && volPct >= 4 && volPct <= 8) score += 0.05;
-      if (h === 'long' && volPct < 4) score += 0.05;
-      candidates.push({ h, score });
-    });
-    if (config.autoTradeHorizon && strategies[config.autoTradeHorizon]) {
-      // prefer configured horizon unless another scores much higher
-      const preferred = candidates.find((c) => c.h === config.autoTradeHorizon);
-      const best = candidates.reduce((a, b) => (b.score > a.score ? b : a), candidates[0]);
-      return best.score - (preferred?.score ?? 0) > 0.2 ? best.h : (config.autoTradeHorizon as
-        | 'short'
-        | 'medium'
-        | 'long');
+  const buffer = 1.001 + config.slippageBps / 10000;
+  try {
+    if (conversion.side === 'BUY') {
+      const qty = missing * buffer;
+      await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+    } else {
+      const snap = await get24hStats(conversion.symbol);
+      const qtyFrom = snap.price > 0 ? (missing / snap.price) * buffer : 0;
+      const freeHome = freeBy.get(home) ?? 0;
+      if (qtyFrom <= 0 || freeHome <= 0) {
+        return { balances, note: `Insufficient ${home} to convert` };
+      }
+      await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: Math.min(qtyFrom, freeHome), type: 'MARKET' });
     }
-    return candidates.reduce((a, b) => (b.score > a.score ? b : a), candidates[0]).h;
-  };
+    bumpConversionCounter();
+    const refreshed = await refreshBalancesFromState();
+    return { balances: refreshed, note: `Converted ${home}->${quote}` };
+  } catch (error) {
+    return { balances, note: `Conversion failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+  }
+};
 
-  const chosenHorizon = selectHorizon();
-  const plan = strategies[chosenHorizon];
-  const entry = plan.entries[0];
-  const positionKey = `${state.symbol}:${chosenHorizon}`;
+const convertToHome = async (
+  symbols: SymbolInfo[],
+  balances: Balance[],
+  fromAsset: string,
+  homeAsset: string,
+  amountFrom: number,
+): Promise<{ balances: Balance[]; note?: string }> => {
+  const from = fromAsset.toUpperCase();
+  const home = homeAsset.toUpperCase();
+  if (from === home) return { balances };
+  if (!config.conversionEnabled) return { balances, note: 'Conversions disabled' };
 
-  const openPosition = persisted.positions[positionKey];
-  if (openPosition && state.market) {
-    const markPnlPct =
-      openPosition.side === 'BUY'
-        ? (state.market.price - openPosition.entryPrice) / openPosition.entryPrice
-        : (openPosition.entryPrice - state.market.price) / openPosition.entryPrice;
-    const markPnlPct100 = markPnlPct * 100;
-    if (markPnlPct100 <= -config.dailyLossCapPct) {
-      logger.warn(
-        { markPnlPct: markPnlPct100.toFixed(2) },
-        'Auto-trade halted by daily loss cap',
-      );
+  const conversion = findConversion(symbols, from, home);
+  if (!conversion) return { balances, note: `No conversion path ${from}->${home}` };
+
+  const freeBy = balanceMap(balances);
+  const freeFrom = freeBy.get(from) ?? 0;
+  const qtyFrom = Math.min(amountFrom, freeFrom);
+  if (qtyFrom <= 0) return { balances };
+
+  const buffer = 1 - config.slippageBps / 10000;
+  try {
+    if (conversion.side === 'SELL') {
+      await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: qtyFrom * buffer, type: 'MARKET' });
+    } else {
+      const snap = await get24hStats(conversion.symbol);
+      const qtyHome = snap.price > 0 ? qtyFrom * snap.price * buffer : 0;
+      if (qtyHome <= 0) return { balances, note: 'Conversion sizing failed' };
+      await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qtyHome, type: 'MARKET' });
+    }
+    bumpConversionCounter();
+    const refreshed = await refreshBalancesFromState();
+    return { balances: refreshed, note: `Converted ${from}->${home}` };
+  } catch (error) {
+    return { balances, note: `Conversion failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+  }
+};
+
+const refreshBalancesFromState = async (): Promise<Balance[]> => {
+  // Prefer balances already fetched during strategy refresh; fallback to exchange if needed.
+  const state = getStrategyResponse();
+  if (state.balances?.length) return state.balances;
+  const fallback = await refreshStrategies(state.symbol, { useAi: false }).then(() => getStrategyResponse(state.symbol));
+  return fallback.balances ?? [];
+};
+
+const selectHorizon = (marketPrice: number, strategies: NonNullable<ReturnType<typeof getStrategyResponse>['strategies']>) => {
+  const volPct =
+    strategies.short && strategies.short.exitPlan
+      ? Math.abs((strategies.short.exitPlan.stopLoss - marketPrice) / marketPrice) * 100
+      : 0;
+  const candidates: { h: 'short' | 'medium' | 'long'; score: number }[] = [];
+  (['short', 'medium', 'long'] as const).forEach((h) => {
+    const plan = strategies[h];
+    if (!plan) return;
+    const entry = plan.entries[0];
+    let score = entry.confidence;
+    score += plan.riskRewardRatio / 10;
+    if (h === 'short' && volPct > 8) score += 0.1;
+    if (h === 'medium' && volPct >= 4 && volPct <= 8) score += 0.05;
+    if (h === 'long' && volPct < 4) score += 0.05;
+    candidates.push({ h, score });
+  });
+  if (candidates.length === 0) return 'short' as const;
+  if (config.autoTradeHorizon && strategies[config.autoTradeHorizon]) {
+    const preferred = candidates.find((c) => c.h === config.autoTradeHorizon);
+    const best = candidates.reduce((a, b) => (b.score > a.score ? b : a), candidates[0]);
+    return best.score - (preferred?.score ?? 0) > 0.2 ? best.h : (config.autoTradeHorizon as 'short' | 'medium' | 'long');
+  }
+  return candidates.reduce((a, b) => (b.score > a.score ? b : a), candidates[0]).h;
+};
+
+const countOpenPositions = () =>
+  Object.values(persisted.positions).filter((p) => p && p.side === 'BUY').length;
+
+const allocatedHome = () =>
+  Object.values(persisted.positions).reduce((sum, p) => sum + (p?.notionalHome ?? 0), 0);
+
+const getPositionKey = (symbol: string, horizon: string) => `${symbol.toUpperCase()}:${horizon}`;
+
+const closePosition = async (symbols: SymbolInfo[], positionKey: string, position: Position, balances: Balance[]) => {
+  const symbol = position.symbol.toUpperCase();
+  const info = findSymbolInfo(symbols, symbol);
+  const baseAsset = (position.baseAsset ?? info?.baseAsset ?? '').toUpperCase();
+  const quoteAsset = (position.quoteAsset ?? info?.quoteAsset ?? '').toUpperCase();
+  const home = config.homeAsset.toUpperCase();
+
+  const snap = await get24hStats(symbol);
+
+  if (position.ocoOrderListId) {
+    try {
+      await cancelOcoOrder(symbol, position.ocoOrderListId);
+    } catch (error) {
+      logger.warn({ err: error, symbol, orderListId: position.ocoOrderListId }, 'Cancel OCO failed (may already be closed)');
+    }
+  }
+
+  const freeBy = balanceMap(balances);
+  const freeBase = baseAsset ? (freeBy.get(baseAsset) ?? 0) : 0;
+  if (freeBase <= 0) {
+    persistPosition(persisted, positionKey, null);
+    return { balances, note: `Position cleared (no ${baseAsset} balance)` };
+  }
+
+  const qtyToSell = Math.min(position.size, freeBase);
+  try {
+    await placeOrder({ symbol, side: 'SELL', quantity: qtyToSell, type: 'MARKET' });
+    persistPosition(persisted, positionKey, null);
+    const refreshed = await refreshBalancesFromState();
+    if (quoteAsset && quoteAsset !== home) {
+      const expectedQuote = qtyToSell * snap.price;
+      const converted = await convertToHome(symbols, refreshed, quoteAsset, home, expectedQuote);
+      return { balances: converted.balances, note: converted.note ?? 'Closed position' };
+    }
+    return { balances: refreshed, note: 'Closed position' };
+  } catch (error) {
+    return { balances, note: `Close failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+  }
+};
+
+const portfolioTick = async (seedSymbol?: string) => {
+  const now = Date.now();
+  const symbols = await fetchTradableSymbols();
+  const state = getStrategyResponse(seedSymbol);
+  let balances: Balance[] = state.balances ?? [];
+  if (!balances.length) balances = await refreshBalancesFromState();
+
+  const home = config.homeAsset.toUpperCase();
+  const freeBy = balanceMap(balances);
+  const freeHome = freeBy.get(home) ?? 0;
+  const maxAllocHome = (freeHome * config.portfolioMaxAllocPct) / 100;
+
+  // Global risk-off on negative sentiment (cached by news service).
+  const news = await getNewsSentiment();
+  const riskOff = news.sentiment <= config.riskOffSentiment;
+  if (riskOff) {
+    for (const [key, pos] of Object.entries(persisted.positions)) {
+      if (!pos) continue;
+      if (pos.side !== 'BUY') {
+        persistPosition(persisted, key, null);
+        continue;
+      }
+      const closed = await closePosition(symbols, key, pos, balances);
+      balances = closed.balances;
+    }
+    recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: `Risk-off: news sentiment ${news.sentiment.toFixed(2)}` });
+    return;
+  }
+
+  // Position exits (TP/SL)
+  for (const [key, pos] of Object.entries(persisted.positions)) {
+    if (!pos || pos.side !== 'BUY') continue;
+    if (!pos.stopLoss && (!pos.takeProfit || pos.takeProfit.length === 0)) continue;
+    const snap = await get24hStats(pos.symbol);
+    if (pos.stopLoss !== undefined && snap.price <= pos.stopLoss) {
+      const closed = await closePosition(symbols, key, pos, balances);
+      balances = closed.balances;
+      recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Stop triggered' });
+      return;
+    }
+    if (pos.takeProfit?.length && snap.price >= pos.takeProfit[0]) {
+      const closed = await closePosition(symbols, key, pos, balances);
+      balances = closed.balances;
+      recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Take-profit triggered' });
+      return;
+    }
+
+    // Exit if current strategy flips to SELL or trading is halted for the symbol.
+    try {
+      await refreshStrategies(pos.symbol, { useAi: false });
+      const latest = getStrategyResponse(pos.symbol);
+      const latestPlan = latest.strategies?.[pos.horizon];
+      if (latest.tradeHalted) {
+        const closed = await closePosition(symbols, key, pos, balances);
+        balances = closed.balances;
+        recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Exit: risk flags' });
+        return;
+      }
+      if (latestPlan && latestPlan.entries[0].side !== 'BUY') {
+        const closed = await closePosition(symbols, key, pos, balances);
+        balances = closed.balances;
+        recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Exit: strategy flipped to SELL' });
+        return;
+      }
+    } catch (error) {
+      logger.warn({ err: error, symbol: pos.symbol }, 'Exit check refresh failed');
+    }
+  }
+
+  const openCount = countOpenPositions();
+  if (openCount >= config.portfolioMaxPositions) {
+    recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: `Max positions reached (${config.portfolioMaxPositions})` });
+    return;
+  }
+
+  const alreadyAllocated = allocatedHome();
+  const remaining = Math.max(0, maxAllocHome - alreadyAllocated);
+  if (remaining <= 0) {
+    recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: `Allocation cap reached (${config.portfolioMaxAllocPct}%)` });
+    return;
+  }
+
+  const ranked = persisted.meta?.rankedCandidates?.map((c) => c.symbol.toUpperCase()) ?? [];
+  const universe = Array.from(new Set([state.symbol.toUpperCase(), ...ranked])).slice(0, 20);
+
+  for (const candidate of universe) {
+    const hasOpen = Object.values(persisted.positions).some((p) => p?.side === 'BUY' && p.symbol.toUpperCase() === candidate);
+    if (hasOpen) continue;
+
+    // Refresh candidate quickly (heuristics-only) to get plans + risk flags.
+    if (candidate !== state.symbol.toUpperCase()) {
+      try {
+        await refreshStrategies(candidate, { useAi: false });
+      } catch (error) {
+        logger.warn({ err: error, candidate }, 'Candidate refresh failed');
+        continue;
+      }
+    }
+
+    const candidateState = getStrategyResponse(candidate);
+    if (!candidateState.strategies || !candidateState.market) continue;
+    if (candidateState.tradeHalted) continue;
+
+    const horizon = selectHorizon(candidateState.market.price, candidateState.strategies);
+    const plan = candidateState.strategies[horizon];
+    const entry = plan.entries[0];
+    if (entry.side !== 'BUY') continue; // spot bot does not open short positions
+
+    if (entry.confidence < config.autoTradeMinConfidence) continue;
+
+    const key = getPositionKey(candidate, horizon);
+    const last = persisted.lastTrades[key] ?? 0;
+    if (now - last < config.autoTradeCooldownMinutes * 60 * 1000) continue;
+
+    const info = findSymbolInfo(symbols, candidate);
+    const quoteAsset = (info?.quoteAsset ?? '').toUpperCase();
+    const baseAsset = (info?.baseAsset ?? '').toUpperCase();
+    if (!quoteAsset || !baseAsset) continue;
+
+    const quoteToHome = await getAssetToHomeRate(symbols, quoteAsset, home);
+    if (!quoteToHome) continue;
+
+    const buffer = 1 + 0.002 + config.slippageBps / 10000;
+    const price = candidateState.market.price;
+
+    let quantity = entry.size;
+    if (!Number.isFinite(quantity) || quantity <= 0) continue;
+
+    const maxQtyByAlloc = remaining / (price * quoteToHome * buffer);
+    quantity = Math.min(quantity, maxQtyByAlloc);
+    if (!Number.isFinite(quantity) || quantity <= 0) continue;
+
+    const requiredQuote = quantity * price * buffer;
+    const ensured = await ensureQuoteAsset(symbols, balances, home, quoteAsset, requiredQuote);
+    balances = ensured.balances;
+    if (ensured.note && ensured.note.startsWith('Conversions disabled')) continue;
+    if (ensured.note && ensured.note.startsWith('No conversion path')) continue;
+    if (ensured.note && ensured.note.startsWith('Conversion failed')) continue;
+
+    const freeNow = balanceMap(balances);
+    const freeQuote = freeNow.get(quoteAsset) ?? 0;
+    const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
+    quantity = Math.min(quantity, maxAffordable);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      recordDecision({ at: now, symbol: candidate, horizon, action: 'skipped', reason: `Insufficient ${quoteAsset} for BUY` });
+      return;
+    }
+
+    try {
+      const order = await placeOrder({ symbol: candidate, side: 'BUY', quantity, type: 'MARKET' });
+      persistLastTrade(persisted, key, now);
+
+      const notionalHome = quantity * price * quoteToHome;
+      const position: Position = {
+        symbol: candidate,
+        horizon,
+        side: 'BUY',
+        entryPrice: entry.priceTarget,
+        size: quantity,
+        stopLoss: plan.exitPlan.stopLoss,
+        takeProfit: plan.exitPlan.takeProfit,
+        baseAsset,
+        quoteAsset,
+        homeAsset: home,
+        notionalHome,
+        openedAt: now,
+      };
+
+      if (config.ocoEnabled) {
+        try {
+          const oco = await placeOcoOrder({
+            symbol: candidate,
+            side: 'SELL',
+            quantity,
+            takeProfit: plan.exitPlan.takeProfit[0],
+            stopLoss: plan.exitPlan.stopLoss,
+          });
+          if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
+            position.ocoOrderListId = (oco as { orderListId: number }).orderListId;
+          }
+        } catch (error) {
+          logger.warn({ err: error, candidate }, 'OCO placement failed; position will rely on TP/SL checks');
+        }
+      }
+
+      persistPosition(persisted, key, position);
+      recordDecision({
+        at: now,
+        symbol: candidate,
+        horizon,
+        action: 'placed',
+        orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+      });
+      return;
+    } catch (error) {
+      recordDecision({
+        at: now,
+        symbol: candidate,
+        horizon,
+        action: 'error',
+        reason: error instanceof Error ? error.message : 'Unknown error',
+      });
       return;
     }
   }
 
-  if (entry.confidence < config.autoTradeMinConfidence) {
-    logger.info(
-      { confidence: entry.confidence, threshold: config.autoTradeMinConfidence },
-      'Auto-trade skipped: low confidence',
-    );
+  recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: 'No eligible candidates to open' });
+};
+
+const singleSymbolTick = async (symbol?: string) => {
+  const now = Date.now();
+  const symbols = await fetchTradableSymbols();
+  const state = getStrategyResponse(symbol);
+  if (!state.strategies || !state.market) {
+    recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: 'No strategies yet' });
     return;
   }
 
-  const key = `${state.symbol}:${chosenHorizon}`;
-  const lastTrade = persisted.lastTrades[key] ?? 0;
-  const cooldownMs = config.autoTradeCooldownMinutes * 60 * 1000;
-  if (Date.now() - lastTrade < cooldownMs) {
-    logger.info({ key }, 'Auto-trade cooldown active');
+  const horizon = selectHorizon(state.market.price, state.strategies);
+  const plan = state.strategies[horizon];
+  const entry = plan.entries[0];
+  const positionKey = getPositionKey(state.symbol, horizon);
+
+  const openPosition = persisted.positions[positionKey];
+  if (openPosition && openPosition.side === 'BUY') {
+    // Risk-off / exit checks for open long.
+    const snap = await get24hStats(state.symbol);
+    const stopLoss = openPosition.stopLoss ?? plan.exitPlan.stopLoss;
+    const takeProfit = openPosition.takeProfit ?? plan.exitPlan.takeProfit;
+
+    const news = await getNewsSentiment();
+    if (news.sentiment <= config.riskOffSentiment) {
+      let balances: Balance[] = state.balances ?? [];
+      if (!balances.length) balances = await refreshBalancesFromState();
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? `Risk-off: sentiment ${news.sentiment.toFixed(2)}` });
+      return;
+    }
+
+    if (stopLoss !== undefined && snap.price <= stopLoss) {
+      let balances: Balance[] = state.balances ?? [];
+      if (!balances.length) balances = await refreshBalancesFromState();
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? 'Stop triggered' });
+      return;
+    }
+    if (takeProfit?.length && snap.price >= takeProfit[0]) {
+      let balances: Balance[] = state.balances ?? [];
+      if (!balances.length) balances = await refreshBalancesFromState();
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? 'Take-profit triggered' });
+      return;
+    }
+
+    if (entry.side !== 'BUY') {
+      let balances: Balance[] = state.balances ?? [];
+      if (!balances.length) balances = await refreshBalancesFromState();
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? 'Exit: strategy flipped to SELL' });
+      return;
+    }
+
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'Position already open' });
+    return;
+  }
+
+  if (entry.side !== 'BUY') {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'SELL signal (spot bot opens longs only)' });
+    return;
+  }
+
+  if (entry.confidence < config.autoTradeMinConfidence) {
+    recordDecision({
+      at: now,
+      symbol: state.symbol,
+      horizon,
+      action: 'skipped',
+      reason: `Low confidence ${(entry.confidence * 100).toFixed(0)}% < ${(config.autoTradeMinConfidence * 100).toFixed(0)}%`,
+    });
+    return;
+  }
+
+  const key = getPositionKey(state.symbol, horizon);
+  const last = persisted.lastTrades[key] ?? 0;
+  if (now - last < config.autoTradeCooldownMinutes * 60 * 1000) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `Cooldown active (${config.autoTradeCooldownMinutes}m)` });
+    return;
+  }
+
+  if (state.tradeHalted) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `Risk flags: ${state.riskFlags.join('; ')}` });
+    return;
+  }
+
+  let balances: Balance[] = state.balances ?? [];
+  if (!balances.length) balances = await refreshBalancesFromState();
+
+  const info = findSymbolInfo(symbols, state.symbol);
+  const quoteAsset = (info?.quoteAsset ?? '').toUpperCase();
+  const baseAsset = (info?.baseAsset ?? '').toUpperCase();
+  if (!quoteAsset || !baseAsset) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'Symbol metadata missing' });
+    return;
+  }
+
+  const home = config.homeAsset.toUpperCase();
+  const quoteToHome = await getAssetToHomeRate(symbols, quoteAsset, home);
+  if (!quoteToHome) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `No conversion rate ${quoteAsset}->${home}` });
+    return;
+  }
+
+  const price = state.market.price;
+  let quantity = entry.size;
+  const buffer = 1 + 0.002 + config.slippageBps / 10000;
+  const requiredQuote = quantity * price * buffer;
+  const ensured = await ensureQuoteAsset(symbols, balances, home, quoteAsset, requiredQuote);
+  balances = ensured.balances;
+  if (ensured.note && ensured.note.startsWith('Conversions disabled')) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: ensured.note });
+    return;
+  }
+
+  const freeNow = balanceMap(balances);
+  const freeQuote = freeNow.get(quoteAsset) ?? 0;
+  const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
+  quantity = Math.min(quantity, maxAffordable);
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `Insufficient ${quoteAsset} for BUY` });
     return;
   }
 
   try {
-    const order = await placeOrder({
+    const order = await placeOrder({ symbol: state.symbol, side: 'BUY', quantity, type: 'MARKET' });
+    persistLastTrade(persisted, key, now);
+
+    const position: Position = {
       symbol: state.symbol,
-      side: entry.side,
-      quantity: entry.size,
-      type: 'MARKET',
-    });
-    persistLastTrade(persisted, key, Date.now());
-    persistPosition(persisted, positionKey, {
-      symbol: state.symbol,
-      horizon: chosenHorizon,
-      side: entry.side,
+      horizon,
+      side: 'BUY',
       entryPrice: entry.priceTarget,
-      size: entry.size,
-      openedAt: Date.now(),
-    });
+      size: quantity,
+      stopLoss: plan.exitPlan.stopLoss,
+      takeProfit: plan.exitPlan.takeProfit,
+      baseAsset,
+      quoteAsset,
+      homeAsset: home,
+      notionalHome: quantity * price * quoteToHome,
+      openedAt: now,
+    };
 
     if (config.ocoEnabled) {
       try {
-        await placeOcoOrder({
+        const oco = await placeOcoOrder({
           symbol: state.symbol,
-          side: entry.side === 'BUY' ? 'SELL' : 'BUY',
-          quantity: entry.size,
+          side: 'SELL',
+          quantity,
           takeProfit: plan.exitPlan.takeProfit[0],
           stopLoss: plan.exitPlan.stopLoss,
         });
+        if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
+          position.ocoOrderListId = (oco as { orderListId: number }).orderListId;
+        }
       } catch (error) {
-        logger.warn({ err: error }, 'OCO placement failed; position left with manual exit');
+        logger.warn({ err: error, symbol: state.symbol }, 'OCO placement failed; position will rely on TP/SL checks');
       }
     }
 
-    logger.info(
-      { orderId: order?.orderId, symbol: state.symbol, horizon: chosenHorizon, volPct },
-      'Auto-trade executed',
-    );
+    persistPosition(persisted, key, position);
+    recordDecision({
+      at: now,
+      symbol: state.symbol,
+      horizon,
+      action: 'placed',
+      orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+    });
   } catch (error) {
-    logger.error({ err: error }, 'Auto-trade failed');
+    recordDecision({
+      at: now,
+      symbol: state.symbol,
+      horizon,
+      action: 'error',
+      reason: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+};
+
+export const autoTradeTick = async (symbol?: string) => {
+  if (!config.autoTradeEnabled) return;
+  if (!config.tradingEnabled) {
+    logger.warn('Auto-trade enabled but TRADING_ENABLED=false; skipping');
+    recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'TRADING_ENABLED=false' });
+    return;
+  }
+
+  try {
+    if (config.portfolioEnabled) {
+      await portfolioTick(symbol);
+    } else {
+      await singleSymbolTick(symbol);
+    }
+  } catch (error) {
+    recordDecision({
+      at: Date.now(),
+      symbol: symbol ?? 'UNKNOWN',
+      action: 'error',
+      reason: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 };

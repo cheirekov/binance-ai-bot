@@ -56,6 +56,35 @@ export interface StrategyResponse {
     feeRate: { maker: number; taker: number };
   };
   availableSymbols: string[];
+  tradingEnabled?: boolean;
+  autoTradeEnabled?: boolean;
+  homeAsset?: string;
+  portfolioEnabled?: boolean;
+  portfolioMaxAllocPct?: number;
+  portfolioMaxPositions?: number;
+  conversionEnabled?: boolean;
+  activeSymbol?: string;
+  autoSelectUpdatedAt?: number | null;
+  rankedCandidates?: { symbol: string; score: number }[];
+  lastAutoTrade?: {
+    at: number;
+    symbol: string;
+    horizon?: Horizon;
+    action: 'skipped' | 'placed' | 'error';
+    reason?: string;
+    orderId?: string | number;
+  };
+  positions?: Record<
+    string,
+    {
+      symbol: string;
+      horizon: Horizon;
+      side: 'BUY' | 'SELL';
+      entryPrice: number;
+      size: number;
+      openedAt: number;
+    }
+  >;
   lastUpdated: number | null;
   error?: string;
   riskFlags?: string[];

@@ -8,9 +8,9 @@ const formatPrice = (value: number | undefined, quoteAsset: string | undefined, 
   const qa = quoteAsset?.toUpperCase();
   const fiatQuotes = ['USD', 'USDT', 'USDC', 'EUR', 'BUSD'];
   if (qa && fiatQuotes.includes(qa)) {
-    const currency = qa === 'EUR' ? 'EUR' : 'USD';
-    const symbol = currency === 'EUR' ? '€' : '$';
-    return `${symbol}${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    if (qa === 'EUR') return `€${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    if (qa === 'USD') return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${qa}`;
   }
   return `${value.toFixed(digits)} ${qa ?? ''}`.trim();
 };
@@ -66,7 +66,7 @@ const BalanceRow = ({ balance }: { balance: Balance }) => (
 
 function App() {
   const [data, setData] = useState<StrategyResponse | null>(null);
-  const [selectedSymbol, setSelectedSymbol] = useState('BTCEUR');
+  const [selectedSymbol, setSelectedSymbol] = useState(() => localStorage.getItem('selectedSymbol') ?? '');
   const [availableSymbols, setAvailableSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -105,6 +105,10 @@ function App() {
     const interval = setInterval(() => void load(selectedSymbol), 25000);
     return () => clearInterval(interval);
   }, [load, selectedSymbol]);
+
+  useEffect(() => {
+    if (selectedSymbol) localStorage.setItem('selectedSymbol', selectedSymbol);
+  }, [selectedSymbol]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -227,6 +231,32 @@ function App() {
               ? `Updated ${new Date(data.lastUpdated).toLocaleTimeString()}`
               : 'Waiting for first tick'}
           </p>
+          {(data?.autoTradeEnabled !== undefined || data?.tradingEnabled !== undefined) && (
+            <p className="muted">
+              Live trading: {data?.tradingEnabled ? 'on' : 'off'} · Auto-trade: {data?.autoTradeEnabled ? 'on' : 'off'}
+            </p>
+          )}
+          {(data?.portfolioEnabled !== undefined || data?.conversionEnabled !== undefined) && (
+            <p className="muted">
+              Portfolio: {data?.portfolioEnabled ? `on (${data?.portfolioMaxAllocPct ?? '—'}% / ${data?.portfolioMaxPositions ?? '—'} pos)` : 'off'}
+              {data?.conversionEnabled !== undefined ? ` · Conversions: ${data.conversionEnabled ? 'on' : 'off'}` : ''}
+              {data?.homeAsset ? ` · Home: ${data.homeAsset}` : ''}
+            </p>
+          )}
+          {data?.activeSymbol && (
+            <p className="muted">
+              Active symbol: <strong>{data.activeSymbol}</strong>
+              {data.autoSelectUpdatedAt ? ` · picked ${new Date(data.autoSelectUpdatedAt).toLocaleTimeString()}` : ''}
+            </p>
+          )}
+          {data?.lastAutoTrade && (
+            <p className="muted">
+              Auto-trade: {data.lastAutoTrade.action}
+              {data.lastAutoTrade.horizon ? ` (${data.lastAutoTrade.horizon})` : ''} ·{' '}
+              {new Date(data.lastAutoTrade.at).toLocaleTimeString()}
+              {data.lastAutoTrade.reason ? ` · ${data.lastAutoTrade.reason}` : ''}
+            </p>
+          )}
           {riskFlags.length > 0 && (
             <div className="risk">
               <p className="label">Risk flags</p>
@@ -307,6 +337,26 @@ function App() {
           </p>
         )}
       </div>
+
+      {data?.rankedCandidates?.length ? (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <p className="eyebrow">Universe</p>
+              <h3>Top candidates (score)</h3>
+            </div>
+          </div>
+          <div className="row">
+            <ul className="signals">
+              {data.rankedCandidates.slice(0, 10).map((c) => (
+                <li key={c.symbol}>
+                  {c.symbol}: {c.score.toFixed(2)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

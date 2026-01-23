@@ -4,6 +4,27 @@ import { Horizon, MarketSnapshot, RiskSettings, Side, StrategyBundle, StrategyPl
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
+const priceDigitsFor = (price: number): number => {
+  const abs = Math.abs(price);
+  if (!Number.isFinite(abs) || abs === 0) return 8;
+  if (abs >= 1000) return 2;
+  if (abs >= 100) return 2;
+  if (abs >= 1) return 4;
+  if (abs >= 0.01) return 6;
+  if (abs >= 0.0001) return 8;
+  return 10;
+};
+
+const qtyDigitsFor = (qty: number): number => {
+  const abs = Math.abs(qty);
+  if (!Number.isFinite(abs) || abs === 0) return 8;
+  if (abs >= 1000) return 2;
+  if (abs >= 100) return 3;
+  if (abs >= 10) return 4;
+  if (abs >= 1) return 6;
+  return 8;
+};
+
 const pickSide = (changePercent: number): Side => {
   if (changePercent > 2) return 'BUY';
   if (changePercent < -2) return 'SELL';
@@ -58,8 +79,13 @@ const buildHeuristicPlan = (
   const riskPerUnitUsd = stopDistance * market.price * Math.max(quoteUsd, 0.0001);
   const rawSize = riskPerUnitUsd > 0 ? capitalAtRiskUsd / riskPerUnitUsd : 0;
   const slippageFactor = Math.max(0, 1 - config.slippageBps / 10000);
-  const size = clamp(rawSize * slippageFactor, 0, risk.maxPositionSizeUsdt / Math.max(market.price, 0.0001));
+  const maxQtyByNotional =
+    risk.maxPositionSizeUsdt / Math.max(market.price * Math.max(quoteUsd, 0.0001), 0.00000001);
+  const size = clamp(rawSize * slippageFactor, 0, maxQtyByNotional);
   const feeEstimate = size * market.price * (risk.feeRate.taker * 2);
+
+  const priceDigits = priceDigitsFor(market.price);
+  const qtyDigits = qtyDigitsFor(size);
 
   return {
     horizon,
@@ -71,17 +97,17 @@ const buildHeuristicPlan = (
       {
         side,
         priceTarget: market.price,
-        size: Number(size.toFixed(4)),
+        size: Number(size.toFixed(qtyDigits)),
         confidence: clamp(0.55 + market.priceChangePercent / 100, 0.2, 0.8),
       },
     ],
     exitPlan: {
-      stopLoss: Number(stopLoss.toFixed(2)),
-      takeProfit: takeProfit.map((v) => Number(v.toFixed(2))),
+      stopLoss: Number(stopLoss.toFixed(priceDigits)),
+      takeProfit: takeProfit.map((v) => Number(v.toFixed(priceDigits))),
       timeframeMinutes: pickTimeframe(horizon),
     },
     riskRewardRatio: rr,
-    estimatedFees: Number(feeEstimate.toFixed(2)),
+    estimatedFees: Number(feeEstimate.toFixed(priceDigits)),
     signalsUsed: [
       `24h momentum ${market.priceChangePercent.toFixed(2)}%`,
       `Volatility ${(volFactor * 100).toFixed(2)}%`,
@@ -97,10 +123,20 @@ export const buildStrategyBundle = async (
   risk: RiskSettings,
   newsSentiment: number,
   quoteUsd: number,
+  options?: { useAi?: boolean },
 ): Promise<StrategyBundle> => {
-  const aiShort = await generateAiInsight({ horizon: 'short', market, risk });
-  const aiMedium = await generateAiInsight({ horizon: 'medium', market, risk });
-  const aiLong = await generateAiInsight({ horizon: 'long', market, risk });
+  const useAi = options?.useAi ?? true;
+  const [aiShort, aiMedium, aiLong] = useAi
+    ? await Promise.all([
+        generateAiInsight({ horizon: 'short', market, risk }),
+        generateAiInsight({ horizon: 'medium', market, risk }),
+        generateAiInsight({ horizon: 'long', market, risk }),
+      ])
+    : [
+        { rationale: '', cautions: [], confidence: 0.0 },
+        { rationale: '', cautions: [], confidence: 0.0 },
+        { rationale: '', cautions: [], confidence: 0.0 },
+      ];
 
   return {
     short: buildHeuristicPlan('short', market, risk, aiShort.rationale, newsSentiment, quoteUsd),

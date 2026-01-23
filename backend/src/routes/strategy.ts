@@ -55,7 +55,7 @@ export async function strategyRoutes(fastify: FastifyInstance) {
     try {
       const result = await refreshBestSymbol();
       const state = getStrategyResponse(result.bestSymbol);
-      await autoTradeTick();
+      await autoTradeTick(result.bestSymbol);
       return { ok: true, state, ranked: result.candidates };
     } catch (error) {
       reply.status(500);

@@ -80,6 +80,25 @@ export interface StrategyResponsePayload {
   risk: RiskSettings;
   quoteAsset: string;
   availableSymbols: string[];
+  tradingEnabled?: boolean;
+  autoTradeEnabled?: boolean;
+  homeAsset?: string;
+  portfolioEnabled?: boolean;
+  portfolioMaxAllocPct?: number;
+  portfolioMaxPositions?: number;
+  conversionEnabled?: boolean;
+  activeSymbol?: string;
+  autoSelectUpdatedAt?: number | null;
+  rankedCandidates?: { symbol: string; score: number }[];
+  lastAutoTrade?: {
+    at: number;
+    symbol: string;
+    horizon?: Horizon;
+    action: 'skipped' | 'placed' | 'error';
+    reason?: string;
+    orderId?: string | number;
+  };
+  positions?: PersistedPayload['positions'];
   lastUpdated: number | null;
   error?: string;
   riskFlags: string[];
@@ -97,7 +116,25 @@ export interface PersistedPayload {
       side: Side;
       entryPrice: number;
       size: number;
+      stopLoss?: number;
+      takeProfit?: number[];
+      baseAsset?: string;
+      quoteAsset?: string;
+      homeAsset?: string;
+      notionalHome?: number;
+      ocoOrderListId?: number;
       openedAt: number;
     }
   >;
+  meta?: {
+    activeSymbol?: string;
+    autoSelectUpdatedAt?: number;
+    rankedCandidates?: { symbol: string; score: number }[];
+    lastAutoTrade?: StrategyResponsePayload['lastAutoTrade'];
+    conversions?: {
+      date: string;
+      count: number;
+      lastAt?: number;
+    };
+  };
 }

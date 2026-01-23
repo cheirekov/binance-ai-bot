@@ -5,6 +5,8 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { PersistedPayload, StrategyResponsePayload } from '../types.js';
 
+let singleton: PersistedPayload | null = null;
+
 const ensureDir = (filePath: string) => {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
@@ -20,10 +22,16 @@ export const loadState = (): PersistedPayload => {
       strategies: parsed.strategies ?? {},
       lastTrades: parsed.lastTrades ?? {},
       positions: parsed.positions ?? {},
+      meta: parsed.meta ?? {},
     };
   } catch {
-    return { strategies: {}, lastTrades: {}, positions: {} };
+    return { strategies: {}, lastTrades: {}, positions: {}, meta: {} };
   }
+};
+
+export const getPersistedState = (): PersistedPayload => {
+  if (!singleton) singleton = loadState();
+  return singleton;
 };
 
 export const saveState = (state: PersistedPayload) => {
@@ -59,5 +67,10 @@ export const persistPosition = (
   } else {
     delete persisted.positions[key];
   }
+  saveState(persisted);
+};
+
+export const persistMeta = (persisted: PersistedPayload, meta: PersistedPayload['meta']) => {
+  persisted.meta = { ...(persisted.meta ?? {}), ...(meta ?? {}) };
   saveState(persisted);
 };

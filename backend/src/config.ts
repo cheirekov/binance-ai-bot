@@ -16,6 +16,11 @@ const listFromEnv = (value: string | undefined, fallback: string[]): string[] =>
     .filter(Boolean);
 };
 
+const boolFromEnv = (value: string | undefined, fallback = false): boolean => {
+  if (value === undefined) return fallback;
+  return value.toLowerCase() === 'true';
+};
+
 export const config = {
   env: process.env.NODE_ENV ?? 'development',
   port: numberFromEnv(process.env.PORT, 8788),
@@ -23,11 +28,12 @@ export const config = {
   binanceApiKey: process.env.BINANCE_API_KEY ?? '',
   binanceApiSecret: process.env.BINANCE_API_SECRET ?? '',
   binanceBaseUrl: process.env.BINANCE_BASE_URL ?? 'https://api.binance.com',
-  tradingEnabled: (process.env.TRADING_ENABLED ?? 'false').toLowerCase() === 'true',
+  tradingEnabled: boolFromEnv(process.env.TRADING_ENABLED, false),
   openAiApiKey: process.env.OPENAI_API_KEY ?? '',
   openAiModel: process.env.OPENAI_MODEL ?? 'gpt-4.1-mini',
   defaultSymbol: (process.env.SYMBOL ?? 'BTCEUR').toUpperCase(),
   quoteAsset: (process.env.QUOTE_ASSET ?? 'EUR').toUpperCase(),
+  homeAsset: (process.env.HOME_ASSET ?? process.env.QUOTE_ASSET ?? 'EUR').toUpperCase(),
   allowedSymbols: listFromEnv(process.env.ALLOWED_SYMBOLS, [
     'BTCEUR',
     'ETHEUR',
@@ -43,8 +49,8 @@ export const config = {
   maxPositionSizeUsdt: numberFromEnv(process.env.MAX_POSITION_SIZE_USDT, 200),
   riskPerTradeBasisPoints: numberFromEnv(process.env.RISK_PER_TRADE_BP, 50),
   refreshSeconds: numberFromEnv(process.env.REFRESH_SECONDS, 30),
-  autoSelectSymbol: (process.env.AUTO_SELECT_SYMBOL ?? 'false').toLowerCase() === 'true',
-  autoDiscoverSymbols: (process.env.AUTO_DISCOVER_SYMBOLS ?? 'true').toLowerCase() === 'true',
+  autoSelectSymbol: boolFromEnv(process.env.AUTO_SELECT_SYMBOL, false),
+  autoDiscoverSymbols: boolFromEnv(process.env.AUTO_DISCOVER_SYMBOLS, true),
   minQuoteVolume: numberFromEnv(process.env.MIN_QUOTE_VOLUME, 5_000_000),
   maxVolatilityPercent: numberFromEnv(process.env.MAX_VOLATILITY_PCT, 18),
   newsFeeds: listFromEnv(
@@ -55,13 +61,18 @@ export const config = {
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
   blacklistSymbols: listFromEnv(process.env.BLACKLIST_SYMBOLS, []),
   persistencePath: process.env.PERSISTENCE_PATH ?? './data/state.json',
-  autoTradeEnabled: (process.env.AUTO_TRADE_ENABLED ?? 'false').toLowerCase() === 'true',
+  autoTradeEnabled: boolFromEnv(process.env.AUTO_TRADE_ENABLED, false),
   autoTradeHorizon: (process.env.AUTO_TRADE_HORIZON ?? 'short').toLowerCase() as 'short' | 'medium' | 'long',
   autoTradeMinConfidence: numberFromEnv(process.env.AUTO_TRADE_MIN_CONFIDENCE, 55) / 100,
   autoTradeCooldownMinutes: numberFromEnv(process.env.AUTO_TRADE_COOLDOWN_MINUTES, 90),
   dailyLossCapPct: numberFromEnv(process.env.DAILY_LOSS_CAP_PCT, 3),
   slippageBps: numberFromEnv(process.env.SLIPPAGE_BPS, 8),
-  ocoEnabled: (process.env.OCO_ENABLED ?? 'true').toLowerCase() === 'true',
+  ocoEnabled: boolFromEnv(process.env.OCO_ENABLED, true),
+  portfolioEnabled: boolFromEnv(process.env.PORTFOLIO_ENABLED, false),
+  portfolioMaxAllocPct: numberFromEnv(process.env.PORTFOLIO_MAX_ALLOC_PCT, 50),
+  portfolioMaxPositions: numberFromEnv(process.env.PORTFOLIO_MAX_POSITIONS, 3),
+  conversionEnabled: boolFromEnv(process.env.CONVERSION_ENABLED, false),
+  riskOffSentiment: numberFromEnv(process.env.RISK_OFF_SENTIMENT, -0.5),
   apiKey: process.env.API_KEY ?? '',
   clientKey: process.env.CLIENT_KEY ?? '',
 };

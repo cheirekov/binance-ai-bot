@@ -7,12 +7,15 @@ let timer: NodeJS.Timeout | null = null;
 
 const runOnce = async () => {
   try {
+    let symbolToTrade: string | undefined = undefined;
     if (config.autoSelectSymbol) {
-      await refreshBestSymbol();
+      const result = await refreshBestSymbol();
+      symbolToTrade = result.bestSymbol;
     } else {
       await refreshStrategies(config.defaultSymbol);
+      symbolToTrade = config.defaultSymbol;
     }
-    await autoTradeTick();
+    await autoTradeTick(symbolToTrade);
   } catch (error) {
     logger.warn({ err: error }, 'Scheduled refresh failed');
   }

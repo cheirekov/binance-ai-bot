@@ -5,6 +5,8 @@ import { logger } from '../logger.js';
 import { Horizon, MarketSnapshot, RiskSettings } from '../types.js';
 
 const client = config.openAiApiKey ? new OpenAI({ apiKey: config.openAiApiKey }) : null;
+const cacheTtlMs = 30 * 60 * 1000;
+const insightCache: Record<string, { fetchedAt: number; value: AiInsight }> = {};
 
 export interface AiInsight {
   rationale: string;
@@ -39,6 +41,13 @@ Return the JSON now.`;
 };
 
 export const generateAiInsight = async (input: PromptInput): Promise<AiInsight> => {
+  const cacheKey = `${input.market.symbol}:${input.horizon}:${config.openAiModel}`;
+  const cached = insightCache[cacheKey];
+  const now = Date.now();
+  if (cached && now - cached.fetchedAt < cacheTtlMs) {
+    return cached.value;
+  }
+
   if (!client) {
     return {
       rationale: 'OpenAI key missing. Using heuristic-only guidance; keep risk tight.',
@@ -61,11 +70,13 @@ export const generateAiInsight = async (input: PromptInput): Promise<AiInsight> 
     const content = completion.choices[0]?.message?.content ?? '{}';
     const parsed = JSON.parse(content) as AiInsight;
 
-    return {
+    const insight = {
       rationale: parsed.rationale ?? 'AI returned no rationale',
       cautions: parsed.cautions ?? [],
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
     };
+    insightCache[cacheKey] = { fetchedAt: now, value: insight };
+    return insight;
   } catch (error) {
     logger.error({ err: error }, 'OpenAI call failed; falling back to heuristics');
     return {

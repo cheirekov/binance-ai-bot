@@ -24,11 +24,24 @@ const scoreHeadline = (headline: string): number => {
 };
 
 const fetchFeedSafely = async (feedUrl: string) => {
-  const res = await fetch(feedUrl);
+  const res = await fetch(feedUrl, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; BinanceAIBot/1.0; +https://localhost)',
+      Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8',
+    },
+  });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`);
   }
+  const contentType = res.headers.get('content-type')?.toLowerCase() ?? '';
   const xml = await res.text();
+  const trimmed = xml.trimStart();
+  const looksXml = trimmed.startsWith('<?xml') || trimmed.startsWith('<rss') || trimmed.startsWith('<feed');
+  const looksHtml = trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
+  if (!looksXml && looksHtml) {
+    throw new Error(`Non-RSS response (content-type: ${contentType || 'unknown'})`);
+  }
   return parser.parseString(xml);
 };
 
