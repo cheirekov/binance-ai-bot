@@ -36,14 +36,14 @@ const fetchFeedSafely = async (feedUrl: string) => {
     throw new Error(`HTTP ${res.status}`);
   }
   const contentType = res.headers.get('content-type')?.toLowerCase() ?? '';
-  const xml = await res.text();
-  const trimmed = xml.trimStart();
-  const looksXml = trimmed.startsWith('<?xml') || trimmed.startsWith('<rss') || trimmed.startsWith('<feed');
-  const looksHtml = trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
-  if (!looksXml && looksHtml) {
+  const body = await res.text();
+  const trimmed = body.trimStart();
+  const headLower = trimmed.slice(0, 200).toLowerCase();
+  const looksXml = headLower.startsWith('<?xml') || headLower.startsWith('<rss') || headLower.startsWith('<feed');
+  if (!looksXml) {
     throw new Error(`Non-RSS response (content-type: ${contentType || 'unknown'})`);
   }
-  return parser.parseString(xml);
+  return parser.parseString(body);
 };
 
 export const getNewsSentiment = async (): Promise<CachedNews> => {

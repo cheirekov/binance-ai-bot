@@ -175,11 +175,15 @@ export const placeOcoOrder = async ({
   takeProfit: number;
   stopLoss: number;
 }) => {
+  if (side !== 'SELL') {
+    throw new Error('OCO supported only for SELL exits (spot long positions)');
+  }
+
   const rules = await getSymbolRules(symbol);
   const qty = floorToStep(quantity, rules?.stepSize);
   const price = floorToStep(takeProfit, rules?.tickSize);
   const stopPrice = floorToStep(stopLoss, rules?.tickSize);
-  const stopLimitPrice = floorToStep(side === 'BUY' ? stopPrice * 1.001 : stopPrice * 0.999, rules?.tickSize);
+  const stopLimitPrice = floorToStep(stopPrice * 0.999, rules?.tickSize);
 
   if (rules?.minQty && qty < rules.minQty) {
     throw new Error(`OCO quantity ${qty} below minQty ${rules.minQty}`);
@@ -188,23 +192,12 @@ export const placeOcoOrder = async ({
   if (qty <= 0 || price <= 0 || stopPrice <= 0 || stopLimitPrice <= 0) {
     throw new Error('Invalid OCO params after rounding');
   }
-  const params = {
-    symbol,
-    side,
-    quantity: qty,
-    price,
-    stopPrice,
-    stopLimitPrice,
-    stopLimitTimeInForce: 'GTC',
-  };
-  const { data } = await client.newOCOOrder(params as {
-    symbol: string;
-    side: 'BUY' | 'SELL';
-    quantity: number;
-    price: number;
-    stopPrice: number;
-    stopLimitPrice: number;
-    stopLimitTimeInForce: string;
+
+  const { data } = await client.newOCOOrder(symbol, side, qty, 'LIMIT_MAKER', 'STOP_LOSS_LIMIT', {
+    abovePrice: price,
+    belowStopPrice: stopPrice,
+    belowPrice: stopLimitPrice,
+    belowTimeInForce: 'GTC',
   });
   return data;
 };
@@ -237,23 +230,15 @@ export const placeOrder = async (params: TradeParams) => {
     orderType === 'LIMIT' && params.price !== undefined
       ? floorToStep(params.price, rules?.tickSize)
       : undefined;
-  const payload =
-    orderType === 'LIMIT'
-      ? {
-          symbol: params.symbol,
-          side: params.side,
-          type: orderType,
-          timeInForce: 'GTC',
-          quantity: adjustedQty,
-          price: adjustedPrice,
-        }
-      : {
-          symbol: params.symbol,
-          side: params.side,
-          type: orderType,
-          quantity: adjustedQty,
-        };
+  if (orderType === 'LIMIT' && adjustedPrice === undefined) {
+    throw new Error('LIMIT order requires price');
+  }
 
-  const { data } = await client.newOrder(payload);
+  const options =
+    orderType === 'LIMIT'
+      ? { timeInForce: 'GTC', quantity: adjustedQty, price: adjustedPrice }
+      : { quantity: adjustedQty };
+
+  const { data } = await client.newOrder(params.symbol, params.side, orderType, options);
   return data;
 };
