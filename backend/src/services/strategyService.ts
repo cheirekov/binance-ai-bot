@@ -24,6 +24,9 @@ let activeSymbol =
 let lastCandidates: { symbol: string; score: number }[] = persisted.meta?.rankedCandidates ?? [];
 let lastAutoSelectAt: number | null = persisted.meta?.autoSelectUpdatedAt ?? null;
 
+const accountBlacklistSet = () =>
+  new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
+
 const cacheBalances = async (): Promise<Balance[]> => {
   const now = Date.now();
   if (cachedBalances && now - cachedBalances.fetchedAt < 30_000) {
@@ -161,6 +164,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
       : lastCandidates.length > 0
         ? lastCandidates.map((c) => c.symbol)
         : Object.keys(stateBySymbol);
+  const blocked = accountBlacklistSet();
+  const availableSymbols = universeSymbols.filter((s) => !blocked.has(s.toUpperCase()));
   return {
     status: state.status,
     symbol,
@@ -172,7 +177,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     emergencyStop: persisted.meta?.emergencyStop ?? false,
     emergencyStopAt: persisted.meta?.emergencyStopAt,
     emergencyStopReason: persisted.meta?.emergencyStopReason,
-    availableSymbols: universeSymbols,
+    availableSymbols,
     tradingEnabled: config.tradingEnabled,
     autoTradeEnabled: config.autoTradeEnabled,
     homeAsset: config.homeAsset,
@@ -259,6 +264,12 @@ export const refreshBestSymbol = async () => {
   // fallback if discovery returned nothing
   if (!symbols.length) {
     symbols = baseSymbols;
+  }
+
+  const blocked = accountBlacklistSet();
+  if (blocked.size > 0) {
+    symbols = symbols.filter((s) => !blocked.has(s.toUpperCase()));
+    discovered = discovered.filter((s) => !blocked.has(s.symbol.toUpperCase()));
   }
 
   // keep it bounded, but pick by liquidity within each quote asset when auto-discovering

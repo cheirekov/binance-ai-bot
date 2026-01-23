@@ -19,6 +19,16 @@ const recordDecision = (decision: NonNullable<PersistedPayload['meta']>['lastAut
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
+const accountBlacklistSet = () =>
+  new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
+
+const blacklistAccountSymbol = (symbol: string, reason: string) => {
+  const upper = symbol.toUpperCase();
+  const existing = persisted.meta?.accountBlacklist ?? {};
+  if (existing[upper]) return;
+  persistMeta(persisted, { accountBlacklist: { ...existing, [upper]: { at: Date.now(), reason } } });
+};
+
 const bumpConversionCounter = () => {
   const now = Date.now();
   const nextDate = todayKey();
@@ -332,6 +342,7 @@ const portfolioTick = async (seedSymbol?: string) => {
   const freeBy = balanceMap(balances);
   const freeHome = freeBy.get(home) ?? 0;
   const maxAllocHome = (freeHome * config.portfolioMaxAllocPct) / 100;
+  const blockedSymbols = accountBlacklistSet();
 
   // Global risk-off on negative sentiment (cached by news service).
   const news = await getNewsSentiment();
@@ -404,7 +415,9 @@ const portfolioTick = async (seedSymbol?: string) => {
   }
 
   const ranked = persisted.meta?.rankedCandidates?.map((c) => c.symbol.toUpperCase()) ?? [];
-  const universe = Array.from(new Set([state.symbol.toUpperCase(), ...ranked])).slice(0, 20);
+  const universe = Array.from(new Set([state.symbol.toUpperCase(), ...ranked]))
+    .filter((s) => !blockedSymbols.has(s.toUpperCase()))
+    .slice(0, 20);
 
   for (const candidate of universe) {
     const hasOpen = Object.values(persisted.positions).some((p) => p?.side === 'BUY' && p.symbol.toUpperCase() === candidate);
@@ -538,12 +551,16 @@ const portfolioTick = async (seedSymbol?: string) => {
       return;
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), candidate }, 'Portfolio entry failed');
+      const message = errorToString(error);
+      if (message.toLowerCase().includes('not permitted for this account')) {
+        blacklistAccountSymbol(candidate, message);
+      }
       recordDecision({
         at: now,
         symbol: candidate,
         horizon,
         action: 'error',
-        reason: errorToString(error),
+        reason: message,
       });
       return;
     }

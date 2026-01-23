@@ -138,6 +138,7 @@ export interface PersistedPayload {
     emergencyStop?: boolean;
     emergencyStopAt?: number;
     emergencyStopReason?: string;
+    accountBlacklist?: Record<string, { at: number; reason: string }>;
     conversions?: {
       date: string;
       count: number;
