@@ -131,6 +131,7 @@ export interface PersistedPayload {
     autoSelectUpdatedAt?: number;
     rankedCandidates?: { symbol: string; score: number }[];
     lastAutoTrade?: StrategyResponsePayload['lastAutoTrade'];
+    ocoReconcileAt?: number;
     conversions?: {
       date: string;
       count: number;

@@ -1,4 +1,4 @@
-import { cancelOcoOrder, get24hStats, placeOcoOrder, placeOrder } from '../binance/client.js';
+import { cancelOcoOrder, get24hStats, getBalances, placeOcoOrder, placeOrder } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -32,6 +32,22 @@ const bumpConversionCounter = () => {
 
 const balanceMap = (balances: Balance[]) =>
   new Map(balances.map((b) => [b.asset.toUpperCase(), b.free]));
+
+const numberFromUnknown = (value: unknown): number | null => {
+  const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+const extractExecutedQty = (order: unknown): number | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  return (
+    numberFromUnknown(rec.executedQty) ??
+    numberFromUnknown(rec.origQty) ??
+    numberFromUnknown(rec.quantity) ??
+    null
+  );
+};
 
 const findSymbolInfo = (symbols: SymbolInfo[], symbol: string) =>
   symbols.find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
@@ -246,9 +262,68 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
   }
 };
 
+const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
+  if (!config.ocoEnabled) return;
+  if (!config.tradingEnabled) return;
+
+  const now = Date.now();
+  const last = persisted.meta?.ocoReconcileAt ?? 0;
+  if (now - last < 10 * 60 * 1000) return;
+
+  const openWithoutOco = Object.entries(persisted.positions).filter(([, pos]) => {
+    if (!pos) return false;
+    if (pos.side !== 'BUY') return false;
+    if (pos.ocoOrderListId) return false;
+    if (!pos.stopLoss) return false;
+    if (!pos.takeProfit?.length) return false;
+    return true;
+  });
+  if (!openWithoutOco.length) return;
+
+  let balances: Balance[] = [];
+  try {
+    balances = await getBalances();
+  } catch (error) {
+    logger.warn({ err: errorToLogObject(error) }, 'OCO reconcile: failed to fetch balances');
+    persistMeta(persisted, { ocoReconcileAt: now });
+    return;
+  }
+  const freeBy = balanceMap(balances);
+
+  for (const [key, pos] of openWithoutOco) {
+    const symbol = pos.symbol.toUpperCase();
+    const info = findSymbolInfo(symbols, symbol);
+    const baseAsset = (pos.baseAsset ?? info?.baseAsset ?? '').toUpperCase();
+    if (!baseAsset) continue;
+    const freeBase = freeBy.get(baseAsset) ?? 0;
+    if (freeBase <= 0) continue;
+    const qty = Math.min(pos.size, freeBase);
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    try {
+      const oco = await placeOcoOrder({
+        symbol,
+        side: 'SELL',
+        quantity: qty,
+        takeProfit: pos.takeProfit![0]!,
+        stopLoss: pos.stopLoss!,
+      });
+      if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
+        const orderListId = (oco as { orderListId: number }).orderListId;
+        persistPosition(persisted, key, { ...pos, size: qty, ocoOrderListId: orderListId });
+        logger.info({ symbol, orderListId, quantity: qty }, 'OCO reconciled');
+      }
+    } catch (error) {
+      logger.warn({ err: errorToLogObject(error), symbol }, 'OCO reconcile failed');
+    }
+  }
+
+  persistMeta(persisted, { ocoReconcileAt: now });
+};
+
 const portfolioTick = async (seedSymbol?: string) => {
   const now = Date.now();
   const symbols = await fetchTradableSymbols();
+  await reconcileOcoForPositions(symbols);
   const state = getStrategyResponse(seedSymbol);
   let balances: Balance[] = state.balances ?? [];
   if (!balances.length) balances = await refreshBalancesFromState();
@@ -398,13 +473,33 @@ const portfolioTick = async (seedSymbol?: string) => {
       const order = await placeOrder({ symbol: candidate, side: 'BUY', quantity, type: 'MARKET' });
       persistLastTrade(persisted, key, now);
 
-      const notionalHome = quantity * price * quoteToHome;
+      const executedQty = extractExecutedQty(order) ?? quantity;
+      let ocoQty = executedQty;
+
+      if (config.ocoEnabled) {
+        try {
+          const freshBalances = await getBalances();
+          if (freshBalances.length) balances = freshBalances;
+          const freeAfter = balanceMap(balances);
+          const freeBase = freeAfter.get(baseAsset) ?? 0;
+          if (freeBase > 0) {
+            ocoQty = Math.min(executedQty, freeBase);
+          } else {
+            ocoQty = executedQty * 0.998;
+          }
+        } catch (error) {
+          logger.warn({ err: errorToLogObject(error), candidate }, 'Post-buy balance refresh failed; sizing OCO with buffer');
+          ocoQty = executedQty * 0.998;
+        }
+      }
+
+      const notionalHome = ocoQty * price * quoteToHome;
       const position: Position = {
         symbol: candidate,
         horizon,
         side: 'BUY',
         entryPrice: entry.priceTarget,
-        size: quantity,
+        size: ocoQty,
         stopLoss: plan.exitPlan.stopLoss,
         takeProfit: plan.exitPlan.takeProfit,
         baseAsset,
@@ -419,12 +514,13 @@ const portfolioTick = async (seedSymbol?: string) => {
           const oco = await placeOcoOrder({
             symbol: candidate,
             side: 'SELL',
-            quantity,
+            quantity: ocoQty,
             takeProfit: plan.exitPlan.takeProfit[0],
             stopLoss: plan.exitPlan.stopLoss,
           });
           if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
             position.ocoOrderListId = (oco as { orderListId: number }).orderListId;
+            logger.info({ symbol: candidate, orderListId: position.ocoOrderListId, quantity: position.size }, 'OCO placed');
           }
       } catch (error) {
         logger.warn({ err: errorToLogObject(error), candidate }, 'OCO placement failed; position will rely on TP/SL checks');
@@ -459,6 +555,7 @@ const portfolioTick = async (seedSymbol?: string) => {
 const singleSymbolTick = async (symbol?: string) => {
   const now = Date.now();
   const symbols = await fetchTradableSymbols();
+  await reconcileOcoForPositions(symbols);
   const state = getStrategyResponse(symbol);
   if (!state.strategies || !state.market) {
     recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: 'No strategies yet' });
@@ -583,18 +680,37 @@ const singleSymbolTick = async (symbol?: string) => {
     const order = await placeOrder({ symbol: state.symbol, side: 'BUY', quantity, type: 'MARKET' });
     persistLastTrade(persisted, key, now);
 
+    const executedQty = extractExecutedQty(order) ?? quantity;
+    let ocoQty = executedQty;
+    if (config.ocoEnabled) {
+      try {
+        const freshBalances = await getBalances();
+        if (freshBalances.length) balances = freshBalances;
+        const freeAfter = balanceMap(balances);
+        const freeBase = freeAfter.get(baseAsset) ?? 0;
+        if (freeBase > 0) {
+          ocoQty = Math.min(executedQty, freeBase);
+        } else {
+          ocoQty = executedQty * 0.998;
+        }
+      } catch (error) {
+        logger.warn({ err: errorToLogObject(error), symbol: state.symbol }, 'Post-buy balance refresh failed; sizing OCO with buffer');
+        ocoQty = executedQty * 0.998;
+      }
+    }
+
     const position: Position = {
       symbol: state.symbol,
       horizon,
       side: 'BUY',
       entryPrice: entry.priceTarget,
-      size: quantity,
+      size: ocoQty,
       stopLoss: plan.exitPlan.stopLoss,
       takeProfit: plan.exitPlan.takeProfit,
       baseAsset,
       quoteAsset,
       homeAsset: home,
-      notionalHome: quantity * price * quoteToHome,
+      notionalHome: ocoQty * price * quoteToHome,
       openedAt: now,
     };
 
@@ -603,12 +719,13 @@ const singleSymbolTick = async (symbol?: string) => {
         const oco = await placeOcoOrder({
           symbol: state.symbol,
           side: 'SELL',
-          quantity,
+          quantity: ocoQty,
           takeProfit: plan.exitPlan.takeProfit[0],
           stopLoss: plan.exitPlan.stopLoss,
         });
         if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
           position.ocoOrderListId = (oco as { orderListId: number }).orderListId;
+          logger.info({ symbol: state.symbol, orderListId: position.ocoOrderListId, quantity: position.size }, 'OCO placed');
         }
       } catch (error) {
         logger.warn(
