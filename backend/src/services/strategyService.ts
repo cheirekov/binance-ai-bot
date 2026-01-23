@@ -24,8 +24,45 @@ let activeSymbol =
 let lastCandidates: { symbol: string; score: number }[] = persisted.meta?.rankedCandidates ?? [];
 let lastAutoSelectAt: number | null = persisted.meta?.autoSelectUpdatedAt ?? null;
 
+const stableLikeAssets = new Set([
+  'USD',
+  'EUR',
+  'GBP',
+  'USDT',
+  'USDC',
+  'BUSD',
+  'TUSD',
+  'FDUSD',
+  'DAI',
+  'USDP',
+  'USDD',
+]);
+
+const isStableLikeAsset = (asset: string) => {
+  const upper = asset.toUpperCase();
+  if (stableLikeAssets.has(upper)) return true;
+  // Common stablecoin tickers (USD1, USDP, USDD, etc.)
+  if (upper.startsWith('USD') && upper.length <= 4) return true;
+  return false;
+};
+
+const isStableToStablePair = (baseAsset: string, quoteAsset: string) =>
+  isStableLikeAsset(baseAsset) && isStableLikeAsset(quoteAsset);
+
 const accountBlacklistSet = () =>
   new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
+
+const ensureActiveSymbolAllowed = () => {
+  const blocked = accountBlacklistSet();
+  const activeUpper = activeSymbol.toUpperCase();
+  if (blocked.has(activeUpper)) {
+    const fallback = [config.defaultSymbol.toUpperCase()].find((s) => !blocked.has(s));
+    if (fallback) {
+      activeSymbol = fallback;
+      persistMeta(persisted, { activeSymbol });
+    }
+  }
+};
 
 const cacheBalances = async (): Promise<Balance[]> => {
   const now = Date.now();
@@ -152,10 +189,22 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
 
 export const getStrategyResponse = (symbolInput?: string): StrategyResponsePayload => {
   let symbol: string;
+  ensureActiveSymbolAllowed();
   try {
     symbol = normalizeSymbol(symbolInput ?? activeSymbol);
   } catch {
     symbol = normalizeSymbol();
+  }
+  const blocked = accountBlacklistSet();
+  if (symbolInput && blocked.has(symbol.toUpperCase())) {
+    // If a user selects a blacklisted symbol in the UI (e.g., stored in localStorage),
+    // transparently return the active/default symbol instead.
+    const fallback = [activeSymbol, config.defaultSymbol]
+      .map((s) => s.toUpperCase())
+      .find((s) => !blocked.has(s));
+    if (fallback) {
+      symbol = normalizeSymbol(fallback);
+    }
   }
   const state = ensureState(symbol);
   const universeSymbols =
@@ -164,8 +213,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
       : lastCandidates.length > 0
         ? lastCandidates.map((c) => c.symbol)
         : Object.keys(stateBySymbol);
-  const blocked = accountBlacklistSet();
   const availableSymbols = universeSymbols.filter((s) => !blocked.has(s.toUpperCase()));
+  const rankedCandidates = lastCandidates.filter((c) => !blocked.has(c.symbol.toUpperCase()));
   return {
     status: state.status,
     symbol,
@@ -187,7 +236,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     conversionEnabled: config.conversionEnabled,
     activeSymbol,
     autoSelectUpdatedAt: lastAutoSelectAt,
-    rankedCandidates: lastCandidates.slice(0, 25),
+    rankedCandidates: rankedCandidates.slice(0, 25),
     lastAutoTrade: persisted.meta?.lastAutoTrade,
     positions: persisted.positions,
     lastUpdated: state.lastUpdated,
@@ -220,7 +269,7 @@ const looksLeverageToken = (symbol: string) => /(UP|DOWN|BULL|BEAR)$/.test(symbo
 export const refreshBestSymbol = async () => {
   const baseSymbols = config.allowedSymbols.length ? config.allowedSymbols : [config.defaultSymbol];
   let symbols = [...baseSymbols];
-  let discovered: { symbol: string; quoteAsset: string }[] = [];
+  let discovered: { symbol: string; quoteAsset: string; baseAsset: string }[] = [];
 
   // If the user provided an explicit allow-list, treat it as the universe for auto-select.
   // Auto-discovery is only used to validate/filter tradable SPOT symbols, not to expand the list.
@@ -234,9 +283,14 @@ export const refreshBestSymbol = async () => {
             (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
             config.allowedQuoteAssets.includes(s.quoteAsset.toUpperCase()) &&
             !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
+            !isStableToStablePair(s.baseAsset, s.quoteAsset) &&
             !looksLeverageToken(s.symbol),
         )
-        .map((s) => ({ symbol: s.symbol.toUpperCase(), quoteAsset: s.quoteAsset.toUpperCase() }));
+        .map((s) => ({
+          symbol: s.symbol.toUpperCase(),
+          quoteAsset: s.quoteAsset.toUpperCase(),
+          baseAsset: s.baseAsset.toUpperCase(),
+        }));
       symbols = discovered.map((s) => s.symbol);
     } catch (error) {
       logger.warn({ err: errorToLogObject(error) }, 'Auto-discover failed; falling back to configured symbols');
@@ -244,6 +298,7 @@ export const refreshBestSymbol = async () => {
   } else if (config.autoDiscoverSymbols && config.allowedSymbols.length > 0) {
     try {
       const exchangeSymbols = await fetchTradableSymbols();
+      const infoBySymbol = new Map(exchangeSymbols.map((s) => [s.symbol.toUpperCase(), s]));
       const tradable = new Set(
         exchangeSymbols
           .filter(
@@ -255,7 +310,14 @@ export const refreshBestSymbol = async () => {
           )
           .map((s) => s.symbol.toUpperCase()),
       );
-      symbols = baseSymbols.filter((s) => tradable.has(s.toUpperCase()));
+      symbols = baseSymbols
+        .map((s) => s.toUpperCase())
+        .filter((s) => tradable.has(s))
+        .filter((s) => {
+          const info = infoBySymbol.get(s);
+          if (!info) return true;
+          return !isStableToStablePair(info.baseAsset, info.quoteAsset);
+        });
     } catch (error) {
       logger.warn({ err: errorToLogObject(error) }, 'Auto-discover validation failed; using configured symbols as-is');
     }

@@ -225,6 +225,10 @@ function App() {
 
   const market = data?.market;
   const quote = market?.quoteAsset ?? data?.quoteAsset;
+  const openPositions = useMemo(() => {
+    const positions = Object.values(data?.positions ?? {});
+    return positions.sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0));
+  }, [data?.positions]);
 
   return (
     <div className="page">
@@ -275,6 +279,11 @@ function App() {
               ? `Updated ${new Date(data.lastUpdated).toLocaleTimeString()}`
               : 'Waiting for first tick'}
           </p>
+          {(data?.symbol ?? selectedSymbol) && (
+            <p className="muted">
+              Viewing symbol: <strong>{data?.symbol ?? selectedSymbol}</strong>
+            </p>
+          )}
           {(data?.autoTradeEnabled !== undefined || data?.tradingEnabled !== undefined) && (
             <p className="muted">
               Live trading: {data?.tradingEnabled ? 'on' : 'off'} · Auto-trade: {data?.autoTradeEnabled ? 'on' : 'off'}
@@ -289,8 +298,17 @@ function App() {
           )}
           {data?.activeSymbol && (
             <p className="muted">
-              Active symbol: <strong>{data.activeSymbol}</strong>
+              Bot active symbol: <strong>{data.activeSymbol}</strong>
               {data.autoSelectUpdatedAt ? ` · picked ${new Date(data.autoSelectUpdatedAt).toLocaleTimeString()}` : ''}
+              {data.symbol && data.activeSymbol.toUpperCase() !== data.symbol.toUpperCase() ? ` · viewing ${data.symbol}` : ''}
+            </p>
+          )}
+          {openPositions.length > 0 && (
+            <p className="muted">
+              Open positions:{' '}
+              {openPositions
+                .map((p) => `${p.symbol.toUpperCase()} (${p.horizon})`)
+                .join(', ')}
             </p>
           )}
           {data?.emergencyStop !== undefined && (

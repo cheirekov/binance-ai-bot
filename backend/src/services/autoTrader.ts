@@ -13,6 +13,27 @@ const persisted = getPersistedState();
 type SymbolInfo = Awaited<ReturnType<typeof fetchTradableSymbols>>[number];
 type Position = PersistedPayload['positions'][string];
 
+const stableLikeAssets = new Set([
+  'USD',
+  'EUR',
+  'GBP',
+  'USDT',
+  'USDC',
+  'BUSD',
+  'TUSD',
+  'FDUSD',
+  'DAI',
+  'USDP',
+  'USDD',
+]);
+
+const isStableLikeAsset = (asset: string) => {
+  const upper = asset.toUpperCase();
+  if (stableLikeAssets.has(upper)) return true;
+  if (upper.startsWith('USD') && upper.length <= 4) return true;
+  return false;
+};
+
 const recordDecision = (decision: NonNullable<PersistedPayload['meta']>['lastAutoTrade']) => {
   persistMeta(persisted, { lastAutoTrade: decision });
 };
@@ -452,6 +473,7 @@ const portfolioTick = async (seedSymbol?: string) => {
     const quoteAsset = (info?.quoteAsset ?? '').toUpperCase();
     const baseAsset = (info?.baseAsset ?? '').toUpperCase();
     if (!quoteAsset || !baseAsset) continue;
+    if (isStableLikeAsset(baseAsset) && isStableLikeAsset(quoteAsset)) continue;
 
     const quoteToHome = await getAssetToHomeRate(symbols, quoteAsset, home);
     if (!quoteToHome) continue;
