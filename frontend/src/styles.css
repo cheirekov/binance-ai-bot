@@ -139,6 +139,12 @@ h3 {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.btn.danger {
+  background: linear-gradient(120deg, #ff6b6b, #ff3d71);
+  color: #0b0b10;
+  border: none;
+}
+
 .select {
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.15);

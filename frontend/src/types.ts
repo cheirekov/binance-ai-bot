@@ -90,4 +90,21 @@ export interface StrategyResponse {
   riskFlags?: string[];
   tradeHalted?: boolean;
   quoteAsset?: string;
+  emergencyStop?: boolean;
+  emergencyStopAt?: number;
+  emergencyStopReason?: string;
+}
+
+export interface PanicLiquidateResponse {
+  ok: boolean;
+  dryRun: boolean;
+  homeAsset: string;
+  emergencyStop: boolean;
+  summary: { placed: number; skipped: number; errored: number; stillHeld: number };
+  actions: Array<
+    | { asset: string; symbol: string; side: 'SELL'; requestedQty: number; status: 'placed' | 'simulated'; orderId?: string | number; executedQty?: number }
+    | { asset: string; status: 'skipped'; reason: string }
+    | { asset: string; symbol?: string; status: 'error'; reason: string }
+  >;
+  balances: Balance[];
 }

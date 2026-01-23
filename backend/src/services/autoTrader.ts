@@ -756,6 +756,10 @@ const singleSymbolTick = async (symbol?: string) => {
 
 export const autoTradeTick = async (symbol?: string) => {
   if (!config.autoTradeEnabled) return;
+  if (persisted.meta?.emergencyStop) {
+    recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'Emergency stop enabled' });
+    return;
+  }
   if (!config.tradingEnabled) {
     logger.warn('Auto-trade enabled but TRADING_ENABLED=false; skipping');
     recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'TRADING_ENABLED=false' });

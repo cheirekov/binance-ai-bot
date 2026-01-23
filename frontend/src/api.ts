@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-import { StrategyResponse } from './types';
+import { PanicLiquidateResponse, StrategyResponse } from './types';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8788',
@@ -36,4 +36,14 @@ export const executeTrade = async (params: {
 }) => {
   const { data } = await api.post('/trade/execute', params);
   return data;
+};
+
+export const panicLiquidate = async (params?: { dryRun?: boolean; stopAutoTrade?: boolean }) => {
+  const { data } = await api.post<PanicLiquidateResponse>('/portfolio/panic-liquidate', params ?? {});
+  return data;
+};
+
+export const setEmergencyStop = async (enabled: boolean, reason?: string) => {
+  const { data } = await api.post('/bot/emergency-stop', { enabled, reason });
+  return data as { ok: boolean; enabled: boolean; at: number };
 };

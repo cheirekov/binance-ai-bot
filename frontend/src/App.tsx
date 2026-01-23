@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { autoSelectSymbol, executeTrade, fetchStrategy, triggerRefresh } from './api';
+import { autoSelectSymbol, executeTrade, fetchStrategy, panicLiquidate, setEmergencyStop, triggerRefresh } from './api';
 import { Balance, StrategyPlan, StrategyResponse } from './types';
 
 const formatPrice = (value: number | undefined, quoteAsset: string | undefined, digits = 8) => {
@@ -70,6 +70,7 @@ function App() {
   const [availableSymbols, setAvailableSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [panicRunning, setPanicRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
   const riskFlags = data?.riskFlags ?? [];
@@ -179,6 +180,49 @@ function App() {
     }
   };
 
+  const onPanic = async () => {
+    const home = data?.homeAsset ?? 'HOME_ASSET';
+    const confirmed = window.confirm(
+      `Panic liquidate: this will MARKET-SELL all free spot balances into ${home} where a direct market exists.\n\nThis also enables Emergency Stop to prevent re-entry.\n\nContinue?`,
+    );
+    if (!confirmed) return;
+
+    setPanicRunning(true);
+    setTradeMessage(null);
+    try {
+      const res = await panicLiquidate({ stopAutoTrade: true });
+      const msg = `Panic complete: placed ${res.summary.placed}, skipped ${res.summary.skipped}, errors ${res.summary.errored}, still held ${res.summary.stillHeld}.`;
+      setTradeMessage(msg);
+      setData((prev) => (prev ? { ...prev, balances: res.balances, emergencyStop: res.emergencyStop } : prev));
+    } catch (err) {
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `Panic error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'Panic failed. Check logs.';
+      setError(message);
+    } finally {
+      setPanicRunning(false);
+      void load(selectedSymbol);
+    }
+  };
+
+  const toggleEmergencyStop = async () => {
+    const enabled = !(data?.emergencyStop ?? false);
+    setRefreshing(true);
+    setTradeMessage(null);
+    try {
+      await setEmergencyStop(enabled, enabled ? 'ui-toggle' : 'ui-clear');
+      await load(selectedSymbol);
+      setTradeMessage(enabled ? 'Emergency stop enabled.' : 'Emergency stop cleared.');
+    } catch {
+      setError('Failed to update emergency stop. Check logs.');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const market = data?.market;
   const quote = market?.quoteAsset ?? data?.quoteAsset;
 
@@ -249,6 +293,13 @@ function App() {
               {data.autoSelectUpdatedAt ? ` · picked ${new Date(data.autoSelectUpdatedAt).toLocaleTimeString()}` : ''}
             </p>
           )}
+          {data?.emergencyStop !== undefined && (
+            <p className="muted">
+              Emergency stop: {data.emergencyStop ? 'on' : 'off'}
+              {data.emergencyStopAt ? ` · ${new Date(data.emergencyStopAt).toLocaleTimeString()}` : ''}
+              {data.emergencyStopReason ? ` · ${data.emergencyStopReason}` : ''}
+            </p>
+          )}
           {data?.lastAutoTrade && (
             <p className="muted">
               Auto-trade: {data.lastAutoTrade.action}
@@ -273,6 +324,12 @@ function App() {
             </button>
             <button className="btn soft" onClick={() => simulateTrade('SELL')} disabled={data?.tradeHalted}>
               Sim sell {tradeQuantity || '—'}
+            </button>
+            <button className="btn danger" onClick={onPanic} disabled={panicRunning}>
+              {panicRunning ? 'Liquidating…' : `Panic: liquidate to ${data?.homeAsset ?? 'HOME'}`}
+            </button>
+            <button className="btn ghost" onClick={toggleEmergencyStop} disabled={refreshing}>
+              {data?.emergencyStop ? 'Resume auto-trade' : 'Emergency stop'}
             </button>
           </div>
         </div>

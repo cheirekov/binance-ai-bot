@@ -99,6 +99,9 @@ export interface StrategyResponsePayload {
     orderId?: string | number;
   };
   positions?: PersistedPayload['positions'];
+  emergencyStop?: boolean;
+  emergencyStopAt?: number;
+  emergencyStopReason?: string;
   lastUpdated: number | null;
   error?: string;
   riskFlags: string[];
@@ -132,6 +135,9 @@ export interface PersistedPayload {
     rankedCandidates?: { symbol: string; score: number }[];
     lastAutoTrade?: StrategyResponsePayload['lastAutoTrade'];
     ocoReconcileAt?: number;
+    emergencyStop?: boolean;
+    emergencyStopAt?: number;
+    emergencyStopReason?: string;
     conversions?: {
       date: string;
       count: number;
