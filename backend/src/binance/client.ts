@@ -4,6 +4,7 @@ import { fetchTradableSymbols } from './exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, MarketSnapshot } from '../types.js';
+import { errorToLogObject } from '../utils/errors.js';
 
 const client = new Spot(config.binanceApiKey, config.binanceApiSecret, {
   baseURL: config.binanceBaseUrl,
@@ -83,7 +84,7 @@ export const get24hStats = async (symbol: string): Promise<MarketSnapshot> => {
         bySymbol: await fetch24hAll(),
       };
     } catch (error) {
-      logger.warn({ err: error }, 'Falling back to per-symbol ticker24hr calls');
+      logger.warn({ err: errorToLogObject(error) }, 'Falling back to per-symbol ticker24hr calls');
       ticker24hCache = null;
     }
   }
@@ -125,7 +126,7 @@ export const getBalances = async (): Promise<Balance[]> => {
         locked: Number(b.locked),
       }));
   } catch (error) {
-    logger.warn({ err: error }, 'Unable to fetch balances (likely using public-only keys)');
+    logger.warn({ err: errorToLogObject(error) }, 'Unable to fetch balances (likely using public-only keys)');
     return [];
   }
 };

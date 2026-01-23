@@ -6,6 +6,7 @@ import { getPersistedState, persistLastTrade, persistMeta, persistPosition } fro
 import { getNewsSentiment } from './newsService.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 import { Balance, PersistedPayload } from '../types.js';
+import { errorToLogObject, errorToString } from '../utils/errors.js';
 
 const persisted = getPersistedState();
 
@@ -115,7 +116,8 @@ const ensureQuoteAsset = async (
     const refreshed = await refreshBalancesFromState();
     return { balances: refreshed, note: `Converted ${home}->${quote}` };
   } catch (error) {
-    return { balances, note: `Conversion failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    logger.warn({ err: errorToLogObject(error), conversion: `${home}->${quote}` }, 'Conversion to quote failed');
+    return { balances, note: `Conversion failed: ${errorToString(error)}` };
   }
 };
 
@@ -153,7 +155,8 @@ const convertToHome = async (
     const refreshed = await refreshBalancesFromState();
     return { balances: refreshed, note: `Converted ${from}->${home}` };
   } catch (error) {
-    return { balances, note: `Conversion failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    logger.warn({ err: errorToLogObject(error), conversion: `${from}->${home}` }, 'Conversion to home failed');
+    return { balances, note: `Conversion failed: ${errorToString(error)}` };
   }
 };
 
@@ -211,9 +214,12 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
   if (position.ocoOrderListId) {
     try {
       await cancelOcoOrder(symbol, position.ocoOrderListId);
-    } catch (error) {
-      logger.warn({ err: error, symbol, orderListId: position.ocoOrderListId }, 'Cancel OCO failed (may already be closed)');
-    }
+  } catch (error) {
+    logger.warn(
+      { err: errorToLogObject(error), symbol, orderListId: position.ocoOrderListId },
+      'Cancel OCO failed (may already be closed)',
+    );
+  }
   }
 
   const freeBy = balanceMap(balances);
@@ -235,7 +241,8 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
     }
     return { balances: refreshed, note: 'Closed position' };
   } catch (error) {
-    return { balances, note: `Close failed: ${error instanceof Error ? error.message : 'Unknown error'}` };
+    logger.warn({ err: errorToLogObject(error), symbol }, 'Close position failed');
+    return { balances, note: `Close failed: ${errorToString(error)}` };
   }
 };
 
@@ -304,7 +311,7 @@ const portfolioTick = async (seedSymbol?: string) => {
         return;
       }
     } catch (error) {
-      logger.warn({ err: error, symbol: pos.symbol }, 'Exit check refresh failed');
+      logger.warn({ err: errorToLogObject(error), symbol: pos.symbol }, 'Exit check refresh failed');
     }
   }
 
@@ -333,7 +340,7 @@ const portfolioTick = async (seedSymbol?: string) => {
       try {
         await refreshStrategies(candidate, { useAi: false });
       } catch (error) {
-        logger.warn({ err: error, candidate }, 'Candidate refresh failed');
+        logger.warn({ err: errorToLogObject(error), candidate }, 'Candidate refresh failed');
         continue;
       }
     }
@@ -419,10 +426,10 @@ const portfolioTick = async (seedSymbol?: string) => {
           if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
             position.ocoOrderListId = (oco as { orderListId: number }).orderListId;
           }
-        } catch (error) {
-          logger.warn({ err: error, candidate }, 'OCO placement failed; position will rely on TP/SL checks');
-        }
+      } catch (error) {
+        logger.warn({ err: errorToLogObject(error), candidate }, 'OCO placement failed; position will rely on TP/SL checks');
       }
+    }
 
       persistPosition(persisted, key, position);
       recordDecision({
@@ -434,12 +441,13 @@ const portfolioTick = async (seedSymbol?: string) => {
       });
       return;
     } catch (error) {
+      logger.warn({ err: errorToLogObject(error), candidate }, 'Portfolio entry failed');
       recordDecision({
         at: now,
         symbol: candidate,
         horizon,
         action: 'error',
-        reason: error instanceof Error ? error.message : 'Unknown error',
+        reason: errorToString(error),
       });
       return;
     }
@@ -603,7 +611,10 @@ const singleSymbolTick = async (symbol?: string) => {
           position.ocoOrderListId = (oco as { orderListId: number }).orderListId;
         }
       } catch (error) {
-        logger.warn({ err: error, symbol: state.symbol }, 'OCO placement failed; position will rely on TP/SL checks');
+        logger.warn(
+          { err: errorToLogObject(error), symbol: state.symbol },
+          'OCO placement failed; position will rely on TP/SL checks',
+        );
       }
     }
 
@@ -621,7 +632,7 @@ const singleSymbolTick = async (symbol?: string) => {
       symbol: state.symbol,
       horizon,
       action: 'error',
-      reason: error instanceof Error ? error.message : 'Unknown error',
+      reason: errorToString(error),
     });
   }
 };
@@ -641,11 +652,12 @@ export const autoTradeTick = async (symbol?: string) => {
       await singleSymbolTick(symbol);
     }
   } catch (error) {
+    logger.error({ err: errorToLogObject(error), symbol: symbol ?? 'UNKNOWN' }, 'Auto-trade tick failed');
     recordDecision({
       at: Date.now(),
       symbol: symbol ?? 'UNKNOWN',
       action: 'error',
-      reason: error instanceof Error ? error.message : 'Unknown error',
+      reason: errorToString(error),
     });
   }
 };

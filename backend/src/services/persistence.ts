@@ -4,6 +4,7 @@ import path from 'path';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { PersistedPayload, StrategyResponsePayload } from '../types.js';
+import { errorToLogObject } from '../utils/errors.js';
 
 let singleton: PersistedPayload | null = null;
 
@@ -39,7 +40,7 @@ export const saveState = (state: PersistedPayload) => {
     ensureDir(config.persistencePath);
     fs.writeFileSync(config.persistencePath, JSON.stringify(state, null, 2), 'utf-8');
   } catch (error) {
-    logger.warn({ err: error }, 'Failed to persist state');
+    logger.warn({ err: errorToLogObject(error) }, 'Failed to persist state');
   }
 };
 

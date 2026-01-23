@@ -2,6 +2,7 @@ import { Spot } from '@binance/connector';
 
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { errorToLogObject } from '../utils/errors.js';
 
 const client = new Spot(config.binanceApiKey, config.binanceApiSecret, {
   baseURL: config.binanceBaseUrl,
@@ -64,7 +65,7 @@ export const fetchTradableSymbols = async (): Promise<SymbolInfo[]> => {
     cache = { fetchedAt: now, symbols };
     return symbols;
   } catch (error) {
-    logger.error({ err: error }, 'Failed to fetch exchange info');
+    logger.error({ err: errorToLogObject(error) }, 'Failed to fetch exchange info');
     throw error;
   }
 };

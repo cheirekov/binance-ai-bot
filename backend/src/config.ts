@@ -7,12 +7,21 @@ const numberFromEnv = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const listFromEnv = (value: string | undefined, fallback: string[]): string[] => {
+const listFromEnvUpper = (value: string | undefined, fallback: string[]): string[] => {
   if (value === undefined) return fallback;
   if (value.trim() === '') return [];
   return value
     .split(',')
     .map((v) => v.trim().toUpperCase())
+    .filter(Boolean);
+};
+
+const listFromEnvRaw = (value: string | undefined, fallback: string[]): string[] => {
+  if (value === undefined) return fallback;
+  if (value.trim() === '') return [];
+  return value
+    .split(',')
+    .map((v) => v.trim())
     .filter(Boolean);
 };
 
@@ -34,7 +43,7 @@ export const config = {
   defaultSymbol: (process.env.SYMBOL ?? 'BTCEUR').toUpperCase(),
   quoteAsset: (process.env.QUOTE_ASSET ?? 'EUR').toUpperCase(),
   homeAsset: (process.env.HOME_ASSET ?? process.env.QUOTE_ASSET ?? 'EUR').toUpperCase(),
-  allowedSymbols: listFromEnv(process.env.ALLOWED_SYMBOLS, [
+  allowedSymbols: listFromEnvUpper(process.env.ALLOWED_SYMBOLS, [
     'BTCEUR',
     'ETHEUR',
     'BTCUSDT',
@@ -44,7 +53,7 @@ export const config = {
     'SOLUSDT',
     'BNBUSDT',
   ]),
-  allowedQuoteAssets: listFromEnv(process.env.ALLOWED_QUOTES, ['USDT', 'USDC', 'EUR']),
+  allowedQuoteAssets: listFromEnvUpper(process.env.ALLOWED_QUOTES, ['USDT', 'USDC', 'EUR']),
   universeMaxSymbols: numberFromEnv(process.env.UNIVERSE_MAX_SYMBOLS, 50),
   maxPositionSizeUsdt: numberFromEnv(process.env.MAX_POSITION_SIZE_USDT, 200),
   riskPerTradeBasisPoints: numberFromEnv(process.env.RISK_PER_TRADE_BP, 50),
@@ -53,13 +62,13 @@ export const config = {
   autoDiscoverSymbols: boolFromEnv(process.env.AUTO_DISCOVER_SYMBOLS, true),
   minQuoteVolume: numberFromEnv(process.env.MIN_QUOTE_VOLUME, 5_000_000),
   maxVolatilityPercent: numberFromEnv(process.env.MAX_VOLATILITY_PCT, 18),
-  newsFeeds: listFromEnv(
+  newsFeeds: listFromEnvRaw(
     process.env.NEWS_FEEDS,
     ['https://rss.app/feeds/tJm8nlqwIBwQnS5s.xml', 'https://www.coindesk.com/arc/outboundfeeds/rss/'],
   ),
   newsCacheMinutes: numberFromEnv(process.env.NEWS_CACHE_MINUTES, 15),
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
-  blacklistSymbols: listFromEnv(process.env.BLACKLIST_SYMBOLS, []),
+  blacklistSymbols: listFromEnvUpper(process.env.BLACKLIST_SYMBOLS, []),
   persistencePath: process.env.PERSISTENCE_PATH ?? './data/state.json',
   autoTradeEnabled: boolFromEnv(process.env.AUTO_TRADE_ENABLED, false),
   autoTradeHorizon: (process.env.AUTO_TRADE_HORIZON ?? 'short').toLowerCase() as 'short' | 'medium' | 'long',

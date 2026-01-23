@@ -4,6 +4,7 @@ import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
 import { buildStrategyBundle } from '../strategy/engine.js';
 import { Balance, RiskSettings, StrategyResponsePayload, StrategyState } from '../types.js';
+import { errorToLogObject } from '../utils/errors.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta, persistStrategy } from './persistence.js';
 
@@ -139,7 +140,7 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
     const snapshot = getStrategyResponse(symbol);
     persistStrategy(persisted, symbol, snapshot);
   } catch (error) {
-    logger.error({ err: error }, 'Failed to refresh strategies');
+    logger.error({ err: errorToLogObject(error), symbol }, 'Failed to refresh strategies');
     state.status = 'error';
     state.error = error instanceof Error ? error.message : 'Unknown error';
     throw error;
@@ -230,7 +231,7 @@ export const refreshBestSymbol = async () => {
         .map((s) => ({ symbol: s.symbol.toUpperCase(), quoteAsset: s.quoteAsset.toUpperCase() }));
       symbols = discovered.map((s) => s.symbol);
     } catch (error) {
-      logger.warn({ err: error }, 'Auto-discover failed; falling back to configured symbols');
+      logger.warn({ err: errorToLogObject(error) }, 'Auto-discover failed; falling back to configured symbols');
     }
   } else if (config.autoDiscoverSymbols && config.allowedSymbols.length > 0) {
     try {
@@ -248,7 +249,7 @@ export const refreshBestSymbol = async () => {
       );
       symbols = baseSymbols.filter((s) => tradable.has(s.toUpperCase()));
     } catch (error) {
-      logger.warn({ err: error }, 'Auto-discover validation failed; using configured symbols as-is');
+      logger.warn({ err: errorToLogObject(error) }, 'Auto-discover validation failed; using configured symbols as-is');
     }
   }
 

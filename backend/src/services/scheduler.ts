@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { autoTradeTick } from './autoTrader.js';
 import { refreshBestSymbol, refreshStrategies } from './strategyService.js';
+import { errorToLogObject } from '../utils/errors.js';
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -17,7 +18,7 @@ const runOnce = async () => {
     }
     await autoTradeTick(symbolToTrade);
   } catch (error) {
-    logger.warn({ err: error }, 'Scheduled refresh failed');
+    logger.warn({ err: errorToLogObject(error) }, 'Scheduled refresh failed');
   }
 };
 

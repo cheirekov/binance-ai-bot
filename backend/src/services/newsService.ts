@@ -2,6 +2,7 @@ import Parser from 'rss-parser';
 
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { errorToLogObject } from '../utils/errors.js';
 
 interface CachedNews {
   fetchedAt: number;
@@ -66,7 +67,7 @@ export const getNewsSentiment = async (): Promise<CachedNews> => {
         count += 1;
       }
     } catch (error) {
-      logger.warn({ err: error, feedUrl }, 'Failed to parse news feed');
+      logger.warn({ err: errorToLogObject(error), feedUrl }, 'Failed to parse news feed');
     }
   }
 

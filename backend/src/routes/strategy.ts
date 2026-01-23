@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { autoTradeTick } from '../services/autoTrader.js';
 import { getStrategyResponse, normalizeSymbol, refreshBestSymbol, refreshStrategies } from '../services/strategyService.js';
+import { errorToLogObject, errorToString } from '../utils/errors.js';
 
 const tradeSchema = z.object({
   side: z.enum(['BUY', 'SELL']),
@@ -30,7 +31,7 @@ export async function strategyRoutes(fastify: FastifyInstance) {
     const state = getStrategyResponse(symbol);
     if (state.status === 'idle' || !state.strategies) {
       void refreshStrategies(state.symbol).catch((error) => {
-        logger.warn({ err: error, symbol: state.symbol }, 'Background refresh failed');
+        logger.warn({ err: errorToLogObject(error), symbol: state.symbol }, 'Background refresh failed');
       });
       return getStrategyResponse(state.symbol);
     }
@@ -46,7 +47,7 @@ export async function strategyRoutes(fastify: FastifyInstance) {
     const symbol = parseResult.data.symbol;
     const state = getStrategyResponse(symbol);
     void refreshStrategies(state.symbol).catch((error) => {
-      logger.warn({ err: error, symbol: state.symbol }, 'Manual refresh failed');
+      logger.warn({ err: errorToLogObject(error), symbol: state.symbol }, 'Manual refresh failed');
     });
     return { ok: true, state: getStrategyResponse(state.symbol) };
   });
@@ -58,8 +59,9 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       await autoTradeTick(result.bestSymbol);
       return { ok: true, state, ranked: result.candidates };
     } catch (error) {
+      logger.error({ err: errorToLogObject(error) }, 'Auto-select failed');
       reply.status(500);
-      return { error: error instanceof Error ? error.message : 'Auto-select failed' };
+      return { error: errorToString(error) };
     }
   });
 
@@ -97,9 +99,9 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       const order = await placeOrder(orderPayload);
       return { ok: true, order };
     } catch (error) {
-      logger.error({ err: error }, 'Trade execution failed');
+      logger.error({ err: errorToLogObject(error) }, 'Trade execution failed');
       reply.status(500);
-      return { error: 'Trade failed', detail: error instanceof Error ? error.message : error };
+      return { error: 'Trade failed', detail: errorToString(error) };
     }
   });
 }

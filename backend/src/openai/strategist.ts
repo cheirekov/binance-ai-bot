@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Horizon, MarketSnapshot, RiskSettings } from '../types.js';
+import { errorToLogObject } from '../utils/errors.js';
 
 const client = config.openAiApiKey ? new OpenAI({ apiKey: config.openAiApiKey }) : null;
 const cacheTtlMs = 30 * 60 * 1000;
@@ -78,7 +79,7 @@ export const generateAiInsight = async (input: PromptInput): Promise<AiInsight> 
     insightCache[cacheKey] = { fetchedAt: now, value: insight };
     return insight;
   } catch (error) {
-    logger.error({ err: error }, 'OpenAI call failed; falling back to heuristics');
+    logger.error({ err: errorToLogObject(error) }, 'OpenAI call failed; falling back to heuristics');
     return {
       rationale: 'AI call failed; operate on heuristics and keep exposure minimal.',
       cautions: ['Retry once network stabilises', 'Keep position size below 0.5% until AI resumes'],
