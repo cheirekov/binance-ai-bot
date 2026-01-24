@@ -34,8 +34,33 @@ const isStableLikeAsset = (asset: string) => {
   return false;
 };
 
+const decimalsForStep = (step?: number): number => {
+  if (!step) return 8;
+  const s = String(step);
+  if (s.includes('e-')) return Number(s.split('e-')[1] ?? 8);
+  const [, frac] = s.split('.');
+  return frac ? frac.length : 0;
+};
+
+const floorToStep = (value: number, step?: number) => {
+  if (!step) return value;
+  const decimals = decimalsForStep(step);
+  const floored = Math.floor(value / step) * step;
+  return Number(floored.toFixed(decimals));
+};
+
 const recordDecision = (decision: NonNullable<PersistedPayload['meta']>['lastAutoTrade']) => {
   persistMeta(persisted, { lastAutoTrade: decision });
+};
+
+type AutoTradeDecision = NonNullable<NonNullable<PersistedPayload['meta']>['lastAutoTrade']>;
+
+const actionFromCloseNote = (note?: string): AutoTradeDecision['action'] => {
+  if (!note) return 'placed';
+  const lowered = note.toLowerCase();
+  if (lowered.startsWith('close failed')) return 'error';
+  if (lowered.startsWith('position cleared')) return 'skipped';
+  return 'placed';
 };
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
@@ -63,6 +88,9 @@ const bumpConversionCounter = () => {
 
 const balanceMap = (balances: Balance[]) =>
   new Map(balances.map((b) => [b.asset.toUpperCase(), b.free]));
+
+const balanceTotalsMap = (balances: Balance[]) =>
+  new Map(balances.map((b) => [b.asset.toUpperCase(), { free: b.free, locked: b.locked, total: b.free + b.locked }]));
 
 const numberFromUnknown = (value: unknown): number | null => {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
@@ -116,6 +144,78 @@ const getAssetToHomeRate = async (symbols: SymbolInfo[], asset: string, homeAsse
     return snap.price > 0 ? 1 / snap.price : null;
   }
   return null;
+};
+
+const computeEquityHome = async (
+  symbols: SymbolInfo[],
+  balances: Balance[],
+  homeAsset: string,
+): Promise<{ totalHome: number; missingAssets: string[] }> => {
+  const home = homeAsset.toUpperCase();
+  let totalHome = 0;
+  const missingAssets: string[] = [];
+
+  for (const bal of balances) {
+    const asset = bal.asset.toUpperCase();
+    const amount = (bal.free ?? 0) + (bal.locked ?? 0);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+
+    if (asset === home) {
+      totalHome += amount;
+      continue;
+    }
+
+    try {
+      const rate = await getAssetToHomeRate(symbols, asset, home);
+      if (!rate || !Number.isFinite(rate) || rate <= 0) {
+        missingAssets.push(asset);
+        continue;
+      }
+      totalHome += amount * rate;
+    } catch {
+      missingAssets.push(asset);
+    }
+  }
+
+  return { totalHome, missingAssets };
+};
+
+const updateEquityTelemetry = async () => {
+  if (!config.binanceApiKey || !config.binanceApiSecret) return;
+
+  try {
+    const symbols = await fetchTradableSymbols();
+    const balances = await getBalances();
+    if (!balances.length) return;
+
+    const home = config.homeAsset.toUpperCase();
+    const { totalHome, missingAssets } = await computeEquityHome(symbols, balances, home);
+    if (!Number.isFinite(totalHome) || totalHome <= 0) return;
+
+    const now = Date.now();
+    const prev = persisted.meta?.equity;
+    const baseline =
+      prev && prev.homeAsset?.toUpperCase() === home
+        ? { startAt: prev.startAt, startHome: prev.startHome }
+        : { startAt: now, startHome: totalHome };
+    const pnlHome = totalHome - baseline.startHome;
+    const pnlPct = baseline.startHome > 0 ? (pnlHome / baseline.startHome) * 100 : 0;
+
+    persistMeta(persisted, {
+      equity: {
+        homeAsset: home,
+        startAt: baseline.startAt,
+        startHome: baseline.startHome,
+        lastAt: now,
+        lastHome: totalHome,
+        pnlHome,
+        pnlPct,
+        missingAssets: missingAssets.length ? missingAssets : undefined,
+      },
+    });
+  } catch (error) {
+    logger.warn({ err: errorToLogObject(error) }, 'Equity telemetry update failed');
+  }
 };
 
 const ensureQuoteAsset = async (
@@ -249,6 +349,63 @@ const allocatedHome = () =>
 
 const getPositionKey = (symbol: string, horizon: string) => `${symbol.toUpperCase()}:${horizon}`;
 
+const reconcilePositionsAgainstBalances = async (symbols: SymbolInfo[], balances: Balance[]) => {
+  const totals = balanceTotalsMap(balances);
+
+  for (const [key, pos] of Object.entries(persisted.positions)) {
+    if (!pos || pos.side !== 'BUY') continue;
+    const symbol = pos.symbol.toUpperCase();
+    const info = findSymbolInfo(symbols, symbol);
+    const baseAsset = (pos.baseAsset ?? info?.baseAsset ?? '').toUpperCase();
+    if (!baseAsset) continue;
+
+    const baseBal = totals.get(baseAsset) ?? { free: 0, locked: 0, total: 0 };
+    const totalBase = baseBal.total;
+    if (!Number.isFinite(totalBase) || totalBase <= 0) {
+      persistPosition(persisted, key, null);
+      logger.info({ symbol, baseAsset }, 'Position cleared (no balance found)');
+      continue;
+    }
+
+    // Clamp to what's actually held and to the exchange step size.
+    const rawQty = Math.min(pos.size, totalBase);
+    const adjustedQty = floorToStep(rawQty, info?.stepSize);
+    const minQty = info?.minQty ?? 0;
+    if (!Number.isFinite(adjustedQty) || adjustedQty <= 0 || (minQty > 0 && adjustedQty < minQty)) {
+      persistPosition(persisted, key, null);
+      logger.info({ symbol, baseAsset, totalBase, minQty }, 'Position cleared (dust below minQty)');
+      continue;
+    }
+
+    // If the position has become untradeable due to minNotional, treat it as dust and stop tracking.
+    const minNotional = info?.minNotional ?? 0;
+    if (minNotional > 0) {
+      try {
+        const snap = await get24hStats(symbol);
+        const notional = adjustedQty * snap.price;
+        if (notional < minNotional) {
+          persistPosition(persisted, key, null);
+          logger.info({ symbol, baseAsset, notional, minNotional }, 'Position cleared (below minNotional)');
+          continue;
+        }
+      } catch {
+        // If we can't price it right now, keep tracking and let exits handle it.
+      }
+    }
+
+    // Update persisted size if it exceeds current holdings (partial fills/manual sells), to prevent repeated close failures.
+    if (adjustedQty < pos.size) {
+      const scale = pos.size > 0 ? adjustedQty / pos.size : 1;
+      persistPosition(persisted, key, {
+        ...pos,
+        size: adjustedQty,
+        notionalHome: pos.notionalHome !== undefined ? pos.notionalHome * scale : pos.notionalHome,
+      });
+      logger.info({ symbol, from: pos.size, to: adjustedQty }, 'Position size reconciled to current balance');
+    }
+  }
+};
+
 const closePosition = async (symbols: SymbolInfo[], positionKey: string, position: Position, balances: Balance[]) => {
   const symbol = position.symbol.toUpperCase();
   const info = findSymbolInfo(symbols, symbol);
@@ -269,20 +426,35 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
   }
   }
 
-  const freeBy = balanceMap(balances);
-  const freeBase = baseAsset ? (freeBy.get(baseAsset) ?? 0) : 0;
-  if (freeBase <= 0) {
+  const totals = balanceTotalsMap(balances);
+  const baseBal = baseAsset ? totals.get(baseAsset) : undefined;
+  const totalBase = baseBal?.total ?? 0;
+  const freeBase = baseBal?.free ?? 0;
+
+  if (!Number.isFinite(totalBase) || totalBase <= 0) {
     persistPosition(persisted, positionKey, null);
     return { balances, note: `Position cleared (no ${baseAsset} balance)` };
   }
 
-  const qtyToSell = Math.min(position.size, freeBase);
+  const qtyToSell = Math.min(position.size, freeBase > 0 ? freeBase : totalBase);
+  const adjustedQty = floorToStep(qtyToSell, info?.stepSize);
+  const minQty = info?.minQty ?? 0;
+  if (!Number.isFinite(adjustedQty) || adjustedQty <= 0 || (minQty > 0 && adjustedQty < minQty)) {
+    persistPosition(persisted, positionKey, null);
+    return { balances, note: `Position cleared as dust (qty ${qtyToSell} < minQty ${minQty || 'unknown'})` };
+  }
+
+  const minNotional = info?.minNotional ?? 0;
+  if (minNotional > 0 && adjustedQty * snap.price < minNotional) {
+    persistPosition(persisted, positionKey, null);
+    return { balances, note: `Position cleared as dust (notional ${(adjustedQty * snap.price).toFixed(8)} < minNotional ${minNotional})` };
+  }
   try {
-    await placeOrder({ symbol, side: 'SELL', quantity: qtyToSell, type: 'MARKET' });
+    await placeOrder({ symbol, side: 'SELL', quantity: adjustedQty, type: 'MARKET' });
     persistPosition(persisted, positionKey, null);
     const refreshed = await refreshBalancesFromState();
     if (quoteAsset && quoteAsset !== home) {
-      const expectedQuote = qtyToSell * snap.price;
+      const expectedQuote = adjustedQty * snap.price;
       const converted = await convertToHome(symbols, refreshed, quoteAsset, home, expectedQuote);
       return { balances: converted.balances, note: converted.note ?? 'Closed position' };
     }
@@ -358,6 +530,7 @@ const portfolioTick = async (seedSymbol?: string) => {
   const state = getStrategyResponse(seedSymbol);
   let balances: Balance[] = state.balances ?? [];
   if (!balances.length) balances = await refreshBalancesFromState();
+  await reconcilePositionsAgainstBalances(symbols, balances);
 
   const home = config.homeAsset.toUpperCase();
   const freeBy = balanceMap(balances);
@@ -387,36 +560,60 @@ const portfolioTick = async (seedSymbol?: string) => {
     if (!pos || pos.side !== 'BUY') continue;
     if (!pos.stopLoss && (!pos.takeProfit || pos.takeProfit.length === 0)) continue;
     const snap = await get24hStats(pos.symbol);
-    if (pos.stopLoss !== undefined && snap.price <= pos.stopLoss) {
-      const closed = await closePosition(symbols, key, pos, balances);
-      balances = closed.balances;
-      recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Stop triggered' });
-      return;
-    }
-    if (pos.takeProfit?.length && snap.price >= pos.takeProfit[0]) {
-      const closed = await closePosition(symbols, key, pos, balances);
-      balances = closed.balances;
-      recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Take-profit triggered' });
-      return;
-    }
+	    if (pos.stopLoss !== undefined && snap.price <= pos.stopLoss) {
+	      const closed = await closePosition(symbols, key, pos, balances);
+	      balances = closed.balances;
+	      recordDecision({
+	        at: now,
+	        symbol: pos.symbol,
+	        horizon: pos.horizon,
+	        action: actionFromCloseNote(closed.note),
+	        reason: closed.note ?? 'Stop triggered',
+	      });
+	      return;
+	    }
+	    if (pos.takeProfit?.length && snap.price >= pos.takeProfit[0]) {
+	      const closed = await closePosition(symbols, key, pos, balances);
+	      balances = closed.balances;
+	      recordDecision({
+	        at: now,
+	        symbol: pos.symbol,
+	        horizon: pos.horizon,
+	        action: actionFromCloseNote(closed.note),
+	        reason: closed.note ?? 'Take-profit triggered',
+	      });
+	      return;
+	    }
 
     // Exit if current strategy flips to SELL or trading is halted for the symbol.
     try {
       await refreshStrategies(pos.symbol, { useAi: false });
       const latest = getStrategyResponse(pos.symbol);
       const latestPlan = latest.strategies?.[pos.horizon];
-      if (latest.tradeHalted) {
-        const closed = await closePosition(symbols, key, pos, balances);
-        balances = closed.balances;
-        recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Exit: risk flags' });
-        return;
-      }
-      if (latestPlan && latestPlan.entries[0].side !== 'BUY') {
-        const closed = await closePosition(symbols, key, pos, balances);
-        balances = closed.balances;
-        recordDecision({ at: now, symbol: pos.symbol, horizon: pos.horizon, action: 'placed', reason: closed.note ?? 'Exit: strategy flipped to SELL' });
-        return;
-      }
+	      if (latest.tradeHalted) {
+	        const closed = await closePosition(symbols, key, pos, balances);
+	        balances = closed.balances;
+	        recordDecision({
+	          at: now,
+	          symbol: pos.symbol,
+	          horizon: pos.horizon,
+	          action: actionFromCloseNote(closed.note),
+	          reason: closed.note ?? 'Exit: risk flags',
+	        });
+	        return;
+	      }
+	      if (latestPlan && latestPlan.entries[0].side !== 'BUY') {
+	        const closed = await closePosition(symbols, key, pos, balances);
+	        balances = closed.balances;
+	        recordDecision({
+	          at: now,
+	          symbol: pos.symbol,
+	          horizon: pos.horizon,
+	          action: actionFromCloseNote(closed.note),
+	          reason: closed.note ?? 'Exit: strategy flipped to SELL',
+	        });
+	        return;
+	      }
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), symbol: pos.symbol }, 'Exit check refresh failed');
     }
@@ -606,6 +803,10 @@ const singleSymbolTick = async (symbol?: string) => {
   const entry = plan.entries[0];
   const positionKey = getPositionKey(state.symbol, horizon);
 
+  let balances: Balance[] = state.balances ?? [];
+  if (!balances.length) balances = await refreshBalancesFromState();
+  await reconcilePositionsAgainstBalances(symbols, balances);
+
   const openPosition = persisted.positions[positionKey];
   if (openPosition && openPosition.side === 'BUY') {
     // Risk-off / exit checks for open long.
@@ -613,37 +814,53 @@ const singleSymbolTick = async (symbol?: string) => {
     const stopLoss = openPosition.stopLoss ?? plan.exitPlan.stopLoss;
     const takeProfit = openPosition.takeProfit ?? plan.exitPlan.takeProfit;
 
-    const news = await getNewsSentiment();
-    if (news.sentiment <= config.riskOffSentiment) {
-      let balances: Balance[] = state.balances ?? [];
-      if (!balances.length) balances = await refreshBalancesFromState();
-      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? `Risk-off: sentiment ${news.sentiment.toFixed(2)}` });
-      return;
-    }
+	    const news = await getNewsSentiment();
+	    if (news.sentiment <= config.riskOffSentiment) {
+	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+	      recordDecision({
+	        at: now,
+	        symbol: state.symbol,
+	        horizon,
+	        action: actionFromCloseNote(closed.note),
+	        reason: closed.note ?? `Risk-off: sentiment ${news.sentiment.toFixed(2)}`,
+	      });
+	      return;
+	    }
 
-    if (stopLoss !== undefined && snap.price <= stopLoss) {
-      let balances: Balance[] = state.balances ?? [];
-      if (!balances.length) balances = await refreshBalancesFromState();
-      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? 'Stop triggered' });
-      return;
-    }
-    if (takeProfit?.length && snap.price >= takeProfit[0]) {
-      let balances: Balance[] = state.balances ?? [];
-      if (!balances.length) balances = await refreshBalancesFromState();
-      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? 'Take-profit triggered' });
-      return;
-    }
+	    if (stopLoss !== undefined && snap.price <= stopLoss) {
+	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+	      recordDecision({
+	        at: now,
+	        symbol: state.symbol,
+	        horizon,
+	        action: actionFromCloseNote(closed.note),
+	        reason: closed.note ?? 'Stop triggered',
+	      });
+	      return;
+	    }
+	    if (takeProfit?.length && snap.price >= takeProfit[0]) {
+	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+	      recordDecision({
+	        at: now,
+	        symbol: state.symbol,
+	        horizon,
+	        action: actionFromCloseNote(closed.note),
+	        reason: closed.note ?? 'Take-profit triggered',
+	      });
+	      return;
+	    }
 
-    if (entry.side !== 'BUY') {
-      let balances: Balance[] = state.balances ?? [];
-      if (!balances.length) balances = await refreshBalancesFromState();
-      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'placed', reason: closed.note ?? 'Exit: strategy flipped to SELL' });
-      return;
-    }
+	    if (entry.side !== 'BUY') {
+	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+	      recordDecision({
+	        at: now,
+	        symbol: state.symbol,
+	        horizon,
+	        action: actionFromCloseNote(closed.note),
+	        reason: closed.note ?? 'Exit: strategy flipped to SELL',
+	      });
+	      return;
+	    }
 
     recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'Position already open' });
     return;
@@ -676,9 +893,6 @@ const singleSymbolTick = async (symbol?: string) => {
     recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `Risk flags: ${state.riskFlags.join('; ')}` });
     return;
   }
-
-  let balances: Balance[] = state.balances ?? [];
-  if (!balances.length) balances = await refreshBalancesFromState();
 
   const info = findSymbolInfo(symbols, state.symbol);
   const quoteAsset = (info?.quoteAsset ?? '').toUpperCase();
@@ -797,11 +1011,13 @@ export const autoTradeTick = async (symbol?: string) => {
   if (!config.autoTradeEnabled) return;
   if (persisted.meta?.emergencyStop) {
     recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'Emergency stop enabled' });
+    await updateEquityTelemetry();
     return;
   }
   if (!config.tradingEnabled) {
     logger.warn('Auto-trade enabled but TRADING_ENABLED=false; skipping');
     recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'TRADING_ENABLED=false' });
+    await updateEquityTelemetry();
     return;
   }
 
@@ -811,6 +1027,7 @@ export const autoTradeTick = async (symbol?: string) => {
     } else {
       await singleSymbolTick(symbol);
     }
+    await updateEquityTelemetry();
   } catch (error) {
     logger.error({ err: errorToLogObject(error), symbol: symbol ?? 'UNKNOWN' }, 'Auto-trade tick failed');
     recordDecision({
@@ -819,5 +1036,6 @@ export const autoTradeTick = async (symbol?: string) => {
       action: 'error',
       reason: errorToString(error),
     });
+    await updateEquityTelemetry();
   }
 };

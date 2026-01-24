@@ -85,6 +85,16 @@ export interface StrategyResponse {
       openedAt: number;
     }
   >;
+  equity?: {
+    homeAsset: string;
+    startAt: number;
+    startHome: number;
+    lastAt: number;
+    lastHome: number;
+    pnlHome: number;
+    pnlPct: number;
+    missingAssets?: string[];
+  };
   lastUpdated: number | null;
   error?: string;
   riskFlags?: string[];

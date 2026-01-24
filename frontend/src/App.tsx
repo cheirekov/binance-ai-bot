@@ -296,6 +296,17 @@ function App() {
               {data?.homeAsset ? ` · Home: ${data.homeAsset}` : ''}
             </p>
           )}
+          {data?.equity && (
+            <p className="muted">
+              Equity {data.equity.lastHome.toLocaleString(undefined, { maximumFractionDigits: 2 })} {data.equity.homeAsset} · PnL{' '}
+              {(data.equity.pnlHome >= 0 ? '+' : '') + data.equity.pnlHome.toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
+              ({(data.equity.pnlPct >= 0 ? '+' : '') + data.equity.pnlPct.toFixed(2)}%) · since{' '}
+              {new Date(data.equity.startAt).toLocaleTimeString()}
+            </p>
+          )}
+          {data?.equity?.missingAssets?.length ? (
+            <p className="muted">Unpriced assets: {data.equity.missingAssets.join(', ')}</p>
+          ) : null}
           {data?.activeSymbol && (
             <p className="muted">
               Bot active symbol: <strong>{data.activeSymbol}</strong>

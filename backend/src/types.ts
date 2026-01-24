@@ -99,6 +99,7 @@ export interface StrategyResponsePayload {
     orderId?: string | number;
   };
   positions?: PersistedPayload['positions'];
+  equity?: NonNullable<PersistedPayload['meta']>['equity'];
   emergencyStop?: boolean;
   emergencyStopAt?: number;
   emergencyStopReason?: string;
@@ -138,6 +139,16 @@ export interface PersistedPayload {
     emergencyStop?: boolean;
     emergencyStopAt?: number;
     emergencyStopReason?: string;
+    equity?: {
+      homeAsset: string;
+      startAt: number;
+      startHome: number;
+      lastAt: number;
+      lastHome: number;
+      pnlHome: number;
+      pnlPct: number;
+      missingAssets?: string[];
+    };
     accountBlacklist?: Record<string, { at: number; reason: string }>;
     conversions?: {
       date: string;

@@ -239,6 +239,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     rankedCandidates: rankedCandidates.slice(0, 25),
     lastAutoTrade: persisted.meta?.lastAutoTrade,
     positions: persisted.positions,
+    equity: persisted.meta?.equity,
     lastUpdated: state.lastUpdated,
     error: state.error,
     riskFlags: state.riskFlags,
