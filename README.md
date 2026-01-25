@@ -11,7 +11,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
 
 ## Quick start (local)
-1) Copy env: `cp .env.example .env` and fill `BINANCE_API_KEY/SECRET` (use restricted keys) and `OPENAI_API_KEY`. Keep `TRADING_ENABLED=false` until ready.
+1) Copy env: `cp .env.example .env` (or start from `cp .env.spot.example .env` / `cp .env.future.example .env`) and fill `BINANCE_API_KEY/SECRET` (use restricted keys) and `OPENAI_API_KEY`. Keep `TRADING_ENABLED=false` until ready.
    - EU-friendly quotes: `QUOTE_ASSET=USDC` and `ALLOWED_QUOTES=USDC,EUR`.
    - For full discovery, leave `ALLOWED_SYMBOLS=` empty. If you set `ALLOWED_SYMBOLS`, the bot will only scan/trade within that allow-list.
    - Auto-trading requires both `AUTO_TRADE_ENABLED=true` and `TRADING_ENABLED=true`.
