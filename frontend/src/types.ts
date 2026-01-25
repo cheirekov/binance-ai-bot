@@ -121,3 +121,7 @@ export interface PanicLiquidateResponse {
   >;
   balances: Balance[];
 }
+
+export interface SweepUnusedResponse extends PanicLiquidateResponse {
+  protectedAssets?: string[];
+}

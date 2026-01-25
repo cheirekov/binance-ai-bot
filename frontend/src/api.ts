@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-import { PanicLiquidateResponse, StrategyResponse } from './types';
+import { PanicLiquidateResponse, StrategyResponse, SweepUnusedResponse } from './types';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8788',
@@ -40,6 +40,17 @@ export const executeTrade = async (params: {
 
 export const panicLiquidate = async (params?: { dryRun?: boolean; stopAutoTrade?: boolean }) => {
   const { data } = await api.post<PanicLiquidateResponse>('/portfolio/panic-liquidate', params ?? {});
+  return data;
+};
+
+export const sweepUnused = async (params?: {
+  dryRun?: boolean;
+  stopAutoTrade?: boolean;
+  keepAllowedQuotes?: boolean;
+  keepPositionAssets?: boolean;
+  keepAssets?: string[];
+}) => {
+  const { data } = await api.post<SweepUnusedResponse>('/portfolio/sweep-unused', params ?? {});
   return data;
 };
 

@@ -21,6 +21,14 @@ const panicSchema = z.object({
   stopAutoTrade: z.boolean().optional().default(true),
 });
 
+const sweepSchema = z.object({
+  dryRun: z.boolean().optional().default(false),
+  stopAutoTrade: z.boolean().optional().default(false),
+  keepAllowedQuotes: z.boolean().optional().default(true),
+  keepPositionAssets: z.boolean().optional().default(true),
+  keepAssets: z.array(z.string().min(1)).optional().default([]),
+});
+
 type LiquidationAction =
   | {
       asset: string;
@@ -159,7 +167,6 @@ export async function controlRoutes(fastify: FastifyInstance) {
     }
 
     const symbols = await fetchTradableSymbols();
-    const byAsset = toMap(balances);
 
     const actions: LiquidationAction[] = [];
     const targets = balances
@@ -249,6 +256,164 @@ export async function controlRoutes(fastify: FastifyInstance) {
       dryRun,
       homeAsset: home,
       emergencyStop: persisted.meta?.emergencyStop ?? false,
+      summary: { placed, skipped, errored, stillHeld: stillHeld.length },
+      actions,
+      balances: refreshed ?? balances,
+    };
+  });
+
+  fastify.post('/portfolio/sweep-unused', async (request, reply) => {
+    if (config.tradeVenue !== 'spot') {
+      reply.status(400);
+      return { error: 'Sweep-unused is only available in spot mode (TRADE_VENUE=spot).' };
+    }
+
+    const parseResult = sweepSchema.safeParse(request.body ?? {});
+    if (!parseResult.success) {
+      reply.status(400);
+      return { error: parseResult.error.flatten() };
+    }
+
+    const home = config.homeAsset?.toUpperCase();
+    if (!home) {
+      reply.status(500);
+      return { error: 'HOME_ASSET is not configured' };
+    }
+
+    const now = Date.now();
+    const dryRun = parseResult.data.dryRun || !config.tradingEnabled;
+
+    if (parseResult.data.stopAutoTrade) {
+      persistMeta(persisted, {
+        emergencyStop: true,
+        emergencyStopAt: now,
+        emergencyStopReason: 'sweep-unused',
+      });
+    }
+
+    let balances: Balance[];
+    try {
+      balances = await getBalances();
+    } catch (error) {
+      reply.status(500);
+      return { error: `Failed to fetch balances: ${errorToString(error)}` };
+    }
+
+    if (!balances.length) {
+      reply.status(400);
+      return { error: 'No balances returned. Check Binance API key permissions.' };
+    }
+
+    const protectedAssets = new Set<string>([home]);
+    if (parseResult.data.keepAllowedQuotes) {
+      for (const asset of config.allowedQuoteAssets) protectedAssets.add(asset.toUpperCase());
+      protectedAssets.add(config.quoteAsset.toUpperCase());
+    }
+    for (const asset of parseResult.data.keepAssets) protectedAssets.add(asset.toUpperCase());
+
+    if (parseResult.data.keepPositionAssets) {
+      for (const pos of Object.values(persisted.positions)) {
+        if (!pos) continue;
+        if ((pos.venue ?? 'spot') !== 'spot') continue;
+        // Spot positions are long-only in this bot, but tolerate stale state and just protect base/quote/home.
+        if (pos.baseAsset) protectedAssets.add(pos.baseAsset.toUpperCase());
+        if (pos.quoteAsset) protectedAssets.add(pos.quoteAsset.toUpperCase());
+        if (pos.homeAsset) protectedAssets.add(pos.homeAsset.toUpperCase());
+      }
+    }
+
+    const symbols = await fetchTradableSymbols();
+    const byAsset = toMap(balances);
+
+    const actions: LiquidationAction[] = [];
+    const targets = balances
+      .filter((b) => !protectedAssets.has(b.asset.toUpperCase()))
+      .filter((b) => (b.free ?? 0) > 0 || (b.locked ?? 0) > 0)
+      .sort((a, b) => a.asset.localeCompare(b.asset));
+
+    for (const bal of targets) {
+      const asset = bal.asset.toUpperCase();
+      const free = bal.free ?? 0;
+      const locked = bal.locked ?? 0;
+
+      if (free <= 0) {
+        actions.push({ asset, status: 'skipped', reason: `No free balance (locked=${locked})` });
+        continue;
+      }
+
+      const pair = symbols.find(
+        (s) =>
+          s.status === 'TRADING' &&
+          (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
+          s.baseAsset.toUpperCase() === asset &&
+          s.quoteAsset.toUpperCase() === home,
+      );
+      if (!pair) {
+        actions.push({ asset, status: 'skipped', reason: `No direct ${asset}${home} market` });
+        continue;
+      }
+
+      const requestedQty = free;
+      if (dryRun) {
+        actions.push({ asset, symbol: pair.symbol, side: 'SELL', requestedQty, status: 'simulated' });
+        continue;
+      }
+
+      try {
+        const order = await placeOrder({ symbol: pair.symbol, side: 'SELL', quantity: requestedQty, type: 'MARKET' });
+        const executedQty = extractExecutedQty(order) ?? undefined;
+        actions.push({
+          asset,
+          symbol: pair.symbol,
+          side: 'SELL',
+          requestedQty,
+          executedQty,
+          orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+          status: 'placed',
+        });
+      } catch (error) {
+        logger.warn({ err: errorToLogObject(error), asset, symbol: pair.symbol }, 'Sweep unused failed');
+        actions.push({
+          asset,
+          symbol: pair.symbol,
+          status: 'error',
+          reason: errorToString(error),
+        });
+      }
+    }
+
+    let refreshed: Balance[] | undefined = undefined;
+    if (!dryRun) {
+      try {
+        refreshed = await getBalances();
+      } catch (error) {
+        logger.warn({ err: errorToLogObject(error) }, 'Failed to refresh balances after sweep');
+      }
+    }
+
+    // If we placed any orders, invalidate cached tickers for HOME conversions by touching a market call.
+    if (actions.some((a) => a.status === 'placed')) {
+      try {
+        const ref = `${home}USDC`;
+        void (await get24hStats(ref));
+      } catch {
+        // ignore
+      }
+    }
+
+    const stillHeld = (refreshed ?? balances).filter(
+      (b) => !protectedAssets.has(b.asset.toUpperCase()) && b.asset.toUpperCase() !== home && (b.free > 0 || b.locked > 0),
+    );
+    const skipped = actions.filter((a) => a.status === 'skipped').length;
+    const errored = actions.filter((a) => a.status === 'error').length;
+    const placed = actions.filter((a) => a.status === 'placed').length;
+
+    return {
+      ok: true,
+      dryRun,
+      homeAsset: home,
+      emergencyStop: persisted.meta?.emergencyStop ?? false,
+      protectedAssets: [...protectedAssets].sort(),
       summary: { placed, skipped, errored, stillHeld: stillHeld.length },
       actions,
       balances: refreshed ?? balances,

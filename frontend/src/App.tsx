@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { autoSelectSymbol, executeTrade, fetchStrategy, panicLiquidate, setEmergencyStop, triggerRefresh } from './api';
+import { autoSelectSymbol, executeTrade, fetchStrategy, panicLiquidate, setEmergencyStop, sweepUnused, triggerRefresh } from './api';
 import { Balance, StrategyPlan, StrategyResponse } from './types';
 
 const formatPrice = (value: number | undefined, quoteAsset: string | undefined, digits = 8) => {
@@ -71,6 +71,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [panicRunning, setPanicRunning] = useState(false);
+  const [sweepRunning, setSweepRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
   const riskFlags = data?.riskFlags ?? [];
@@ -207,6 +208,39 @@ function App() {
       setError(message);
     } finally {
       setPanicRunning(false);
+      void load(selectedSymbol);
+    }
+  };
+
+  const onSweepUnused = async () => {
+    const home = data?.homeAsset ?? 'HOME_ASSET';
+    const venue = data?.tradeVenue ?? 'spot';
+    if (venue !== 'spot') {
+      setTradeMessage('Sweep unused is available only in spot mode.');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Sweep unused: this will MARKET-SELL free balances (excluding HOME/allowed quotes/open-position assets) into ${home} where a direct market exists.\n\nLocked balances and open orders are not modified.\n\nContinue?`,
+    );
+    if (!confirmed) return;
+
+    setSweepRunning(true);
+    setTradeMessage(null);
+    try {
+      const res = await sweepUnused({ keepAllowedQuotes: true, keepPositionAssets: true, stopAutoTrade: false });
+      const msg = `Sweep complete: placed ${res.summary.placed}, skipped ${res.summary.skipped}, errors ${res.summary.errored}, still held ${res.summary.stillHeld}.`;
+      setTradeMessage(msg);
+      setData((prev) => (prev ? { ...prev, balances: res.balances, emergencyStop: res.emergencyStop } : prev));
+    } catch (err) {
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `Sweep error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'Sweep failed. Check logs.';
+      setError(message);
+    } finally {
+      setSweepRunning(false);
       void load(selectedSymbol);
     }
   };
@@ -364,6 +398,9 @@ function App() {
             </button>
             <button className="btn soft" onClick={() => simulateTrade('SELL')} disabled={data?.tradeHalted}>
               Sim sell {tradeQuantity || '—'}
+            </button>
+            <button className="btn soft" onClick={onSweepUnused} disabled={sweepRunning || data?.tradeVenue === 'futures'}>
+              {sweepRunning ? 'Sweeping…' : `Sweep unused → ${data?.homeAsset ?? 'HOME'}`}
             </button>
             <button className="btn danger" onClick={onPanic} disabled={panicRunning}>
               {panicRunning

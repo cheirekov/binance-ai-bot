@@ -446,12 +446,18 @@ const selectHorizon = (marketPrice: number, strategies: NonNullable<ReturnType<t
   return candidates.reduce((a, b) => (b.score > a.score ? b : a), candidates[0]).h;
 };
 
-const countOpenPositions = () =>
-  Object.values(persisted.positions).filter((p) => p && positionVenue(p) === config.tradeVenue).length;
+const isCountablePositionForVenue = (pos: Position) => {
+  if (positionVenue(pos) !== config.tradeVenue) return false;
+  // Spot bot is long-only; ignore stale SELL entries from older state files.
+  if (config.tradeVenue === 'spot' && pos.side !== 'BUY') return false;
+  return true;
+};
+
+const countOpenPositions = () => Object.values(persisted.positions).filter((p) => p && isCountablePositionForVenue(p)).length;
 
 const allocatedHome = () =>
   Object.values(persisted.positions).reduce(
-    (sum, p) => (p && positionVenue(p) === config.tradeVenue ? sum + (p.notionalHome ?? 0) : sum),
+    (sum, p) => (p && isCountablePositionForVenue(p) ? sum + (p.notionalHome ?? 0) : sum),
     0,
   );
 
@@ -461,8 +467,13 @@ const reconcilePositionsAgainstBalances = async (symbols: SymbolInfo[], balances
   const totals = balanceTotalsMap(balances);
 
   for (const [key, pos] of Object.entries(persisted.positions)) {
-    if (!pos || pos.side !== 'BUY') continue;
+    if (!pos) continue;
     if (positionVenue(pos) !== 'spot') continue;
+    if (pos.side !== 'BUY') {
+      persistPosition(persisted, key, null);
+      logger.info({ symbol: pos.symbol, side: pos.side }, 'Spot position cleared (unsupported side)');
+      continue;
+    }
     const symbol = pos.symbol.toUpperCase();
     const info = findSymbolInfo(symbols, symbol);
     const baseAsset = (pos.baseAsset ?? info?.baseAsset ?? '').toUpperCase();
