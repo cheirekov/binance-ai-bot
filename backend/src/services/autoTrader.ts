@@ -125,24 +125,54 @@ const findConversion = (symbols: SymbolInfo[], fromAsset: string, toAsset: strin
   return null;
 };
 
-const getAssetToHomeRate = async (symbols: SymbolInfo[], asset: string, homeAsset: string): Promise<number | null> => {
-  const assetUp = asset.toUpperCase();
-  const homeUp = homeAsset.toUpperCase();
-  if (assetUp === homeUp) return 1;
+const getAssetToAssetRate = async (
+  symbols: SymbolInfo[],
+  fromAsset: string,
+  toAsset: string,
+): Promise<number | null> => {
+  const from = fromAsset.toUpperCase();
+  const to = toAsset.toUpperCase();
+  if (from === to) return 1;
+
   const direct = symbols.find(
-    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === assetUp && s.quoteAsset.toUpperCase() === homeUp,
+    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === from && s.quoteAsset.toUpperCase() === to,
   );
   if (direct) {
     const snap = await get24hStats(direct.symbol);
     return snap.price;
   }
+
   const inverse = symbols.find(
-    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === homeUp && s.quoteAsset.toUpperCase() === assetUp,
+    (s) => s.status === 'TRADING' && s.baseAsset.toUpperCase() === to && s.quoteAsset.toUpperCase() === from,
   );
   if (inverse) {
     const snap = await get24hStats(inverse.symbol);
     return snap.price > 0 ? 1 / snap.price : null;
   }
+
+  return null;
+};
+
+const getAssetToHomeRate = async (symbols: SymbolInfo[], asset: string, homeAsset: string): Promise<number | null> => {
+  const assetUp = asset.toUpperCase();
+  const homeUp = homeAsset.toUpperCase();
+  if (assetUp === homeUp) return 1;
+
+  const direct = await getAssetToAssetRate(symbols, assetUp, homeUp);
+  if (direct) return direct;
+
+  // Try 2-hop pricing via common intermediates (needed for BTC-quoted alts like JSTBTC -> USDC).
+  const intermediates = ['USDC', 'USDT', 'BTC', 'ETH', 'BNB'];
+  for (const mid of intermediates) {
+    const midUp = mid.toUpperCase();
+    if (midUp === assetUp || midUp === homeUp) continue;
+    const leg1 = await getAssetToAssetRate(symbols, assetUp, midUp);
+    if (!leg1) continue;
+    const leg2 = await getAssetToAssetRate(symbols, midUp, homeUp);
+    if (!leg2) continue;
+    return leg1 * leg2;
+  }
+
   return null;
 };
 
@@ -184,6 +214,12 @@ const updateEquityTelemetry = async () => {
   if (!config.binanceApiKey || !config.binanceApiSecret) return;
 
   try {
+    const now = Date.now();
+    const prev = persisted.meta?.equity;
+    if (prev && Number.isFinite(prev.lastAt) && now - prev.lastAt < Math.max(10_000, config.refreshSeconds * 1000)) {
+      return;
+    }
+
     const symbols = await fetchTradableSymbols();
     const balances = await getBalances();
     if (!balances.length) return;
@@ -192,20 +228,20 @@ const updateEquityTelemetry = async () => {
     const { totalHome, missingAssets } = await computeEquityHome(symbols, balances, home);
     if (!Number.isFinite(totalHome) || totalHome <= 0) return;
 
-    const now = Date.now();
-    const prev = persisted.meta?.equity;
-    const baseline =
-      prev && prev.homeAsset?.toUpperCase() === home
-        ? { startAt: prev.startAt, startHome: prev.startHome }
-        : { startAt: now, startHome: totalHome };
-    const pnlHome = totalHome - baseline.startHome;
-    const pnlPct = baseline.startHome > 0 ? (pnlHome / baseline.startHome) * 100 : 0;
+    const prevMatches = prev && prev.homeAsset?.toUpperCase() === home;
+    const sameDay =
+      prevMatches && Number.isFinite(prev.startAt) ? new Date(prev.startAt).toISOString().slice(0, 10) === todayKey() : false;
+    const startAt = prevMatches && sameDay && Number.isFinite(prev.startAt) ? prev.startAt : now;
+    const startHome =
+      prevMatches && sameDay && Number.isFinite(prev.startHome) && prev.startHome > 0 ? prev.startHome : totalHome;
+    const pnlHome = totalHome - startHome;
+    const pnlPct = startHome > 0 ? (pnlHome / startHome) * 100 : 0;
 
     persistMeta(persisted, {
       equity: {
         homeAsset: home,
-        startAt: baseline.startAt,
-        startHome: baseline.startHome,
+        startAt,
+        startHome,
         lastAt: now,
         lastHome: totalHome,
         pnlHome,
@@ -216,6 +252,29 @@ const updateEquityTelemetry = async () => {
   } catch (error) {
     logger.warn({ err: errorToLogObject(error) }, 'Equity telemetry update failed');
   }
+};
+
+const enforceDailyLossCap = async (seedSymbol?: string): Promise<boolean> => {
+  if (!config.dailyLossCapPct || config.dailyLossCapPct <= 0) return false;
+
+  await updateEquityTelemetry();
+  const eq = persisted.meta?.equity;
+  if (!eq || !Number.isFinite(eq.pnlPct)) return false;
+
+  if (eq.pnlPct <= -Math.abs(config.dailyLossCapPct)) {
+    const now = Date.now();
+    const reason = `Daily loss cap hit: ${eq.pnlPct.toFixed(2)}% <= -${Math.abs(config.dailyLossCapPct).toFixed(2)}%`;
+    persistMeta(persisted, {
+      emergencyStop: true,
+      emergencyStopAt: now,
+      emergencyStopReason: reason,
+    });
+    recordDecision({ at: now, symbol: seedSymbol ?? persisted.meta?.activeSymbol ?? 'UNKNOWN', action: 'skipped', reason });
+    logger.warn({ pnlPct: eq.pnlPct, capPct: config.dailyLossCapPct }, 'Daily loss cap triggered; emergency stop enabled');
+    return true;
+  }
+
+  return false;
 };
 
 const ensureQuoteAsset = async (
@@ -697,8 +756,7 @@ const portfolioTick = async (seedSymbol?: string) => {
     const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
     quantity = Math.min(quantity, maxAffordable);
     if (!Number.isFinite(quantity) || quantity <= 0) {
-      recordDecision({ at: now, symbol: candidate, horizon, action: 'skipped', reason: `Insufficient ${quoteAsset} for BUY` });
-      return;
+      continue;
     }
 
     try {
@@ -771,7 +829,8 @@ const portfolioTick = async (seedSymbol?: string) => {
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), candidate }, 'Portfolio entry failed');
       const message = errorToString(error);
-      if (message.toLowerCase().includes('not permitted for this account')) {
+      const lowered = message.toLowerCase();
+      if (lowered.includes('not permitted for this account')) {
         blacklistAccountSymbol(candidate, message);
       }
       recordDecision({
@@ -781,6 +840,14 @@ const portfolioTick = async (seedSymbol?: string) => {
         action: 'error',
         reason: message,
       });
+      if (
+        lowered.includes('below minnotional') ||
+        lowered.includes('below minqty') ||
+        lowered.includes('insufficient') ||
+        lowered.includes('not permitted for this account')
+      ) {
+        continue;
+      }
       return;
     }
   }
@@ -1014,6 +1081,13 @@ export const autoTradeTick = async (symbol?: string) => {
     await updateEquityTelemetry();
     return;
   }
+
+  if (await enforceDailyLossCap(symbol)) {
+    // emergencyStop is now enabled; do nothing else this tick.
+    await updateEquityTelemetry();
+    return;
+  }
+
   if (!config.tradingEnabled) {
     logger.warn('Auto-trade enabled but TRADING_ENABLED=false; skipping');
     recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'TRADING_ENABLED=false' });

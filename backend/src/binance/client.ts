@@ -42,6 +42,13 @@ const floorToStep = (value: number, step?: number) => {
   return Number(floored.toFixed(decimals));
 };
 
+const toStepString = (value: number, step?: number, fallbackDecimals = 8) => {
+  const decimals = step ? decimalsForStep(step) : fallbackDecimals;
+  const floored = step ? Math.floor(value / step) * step : value;
+  // Important: keep as a fixed decimal string (Binance rejects scientific notation like "5e-7").
+  return Number.isFinite(floored) ? floored.toFixed(decimals) : '0';
+};
+
 const getSymbolRules = async (symbol: string) => {
   const upper = symbol.toUpperCase();
   const symbols = await fetchTradableSymbols();
@@ -184,6 +191,10 @@ export const placeOcoOrder = async ({
   const price = floorToStep(takeProfit, rules?.tickSize);
   const stopPrice = floorToStep(stopLoss, rules?.tickSize);
   const stopLimitPrice = floorToStep(stopPrice * 0.999, rules?.tickSize);
+  const qtyStr = toStepString(quantity, rules?.stepSize);
+  const priceStr = toStepString(takeProfit, rules?.tickSize);
+  const stopPriceStr = toStepString(stopLoss, rules?.tickSize);
+  const stopLimitPriceStr = toStepString(stopPrice * 0.999, rules?.tickSize);
 
   if (rules?.minQty && qty < rules.minQty) {
     throw new Error(`OCO quantity ${qty} below minQty ${rules.minQty}`);
@@ -193,10 +204,10 @@ export const placeOcoOrder = async ({
     throw new Error('Invalid OCO params after rounding');
   }
 
-  const { data } = await client.newOCOOrder(symbol, side, qty, 'LIMIT_MAKER', 'STOP_LOSS_LIMIT', {
-    abovePrice: price,
-    belowStopPrice: stopPrice,
-    belowPrice: stopLimitPrice,
+  const { data } = await client.newOCOOrder(symbol, side, qtyStr, 'LIMIT_MAKER', 'STOP_LOSS_LIMIT', {
+    abovePrice: priceStr,
+    belowStopPrice: stopPriceStr,
+    belowPrice: stopLimitPriceStr,
     belowTimeInForce: 'GTC',
   });
   return data;
@@ -214,6 +225,7 @@ export const placeOrder = async (params: TradeParams) => {
 
   const rules = await getSymbolRules(params.symbol);
   const adjustedQty = floorToStep(params.quantity, rules?.stepSize);
+  const adjustedQtyStr = toStepString(adjustedQty, rules?.stepSize);
   if (rules?.minQty && adjustedQty < rules.minQty) {
     throw new Error(`Quantity ${adjustedQty} below minQty ${rules.minQty}`);
   }
@@ -230,14 +242,16 @@ export const placeOrder = async (params: TradeParams) => {
     orderType === 'LIMIT' && params.price !== undefined
       ? floorToStep(params.price, rules?.tickSize)
       : undefined;
+  const adjustedPriceStr =
+    orderType === 'LIMIT' && adjustedPrice !== undefined ? toStepString(adjustedPrice, rules?.tickSize) : undefined;
   if (orderType === 'LIMIT' && adjustedPrice === undefined) {
     throw new Error('LIMIT order requires price');
   }
 
   const options =
     orderType === 'LIMIT'
-      ? { timeInForce: 'GTC', quantity: adjustedQty, price: adjustedPrice }
-      : { quantity: adjustedQty };
+      ? { timeInForce: 'GTC', quantity: adjustedQtyStr, price: adjustedPriceStr }
+      : { quantity: adjustedQtyStr };
 
   const { data } = await client.newOrder(params.symbol, params.side, orderType, options);
   return data;

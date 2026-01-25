@@ -47,11 +47,15 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `POST /strategy/auto-select` — score allowed symbols, pick the strongest, and refresh strategies
 - `POST /backtest` — simple TP/SL sim over recent klines `{ symbol?, interval?, limit? }`
 - `POST /trade/execute` — `{ side, quantity, price?, type?, symbol? }`; simulated unless `TRADING_ENABLED=true`
+- `POST /bot/emergency-stop` — `{ enabled: boolean, reason?: string }` (halts auto-trade ticks)
+- `POST /portfolio/panic-liquidate` — `{ dryRun?: boolean, stopAutoTrade?: boolean }` (sell free balances to `HOME_ASSET` where markets exist)
 
 ## Notes and safety
 - The bot estimates Binance spot fees (0.1% maker/taker) and limits size via `MAX_POSITION_SIZE_USDT` + `RISK_PER_TRADE_BP`.
 - OpenAI assists with thesis notes; heuristics still produce numbers when AI is offline.
 - Live trading is **off by default**. Enable only after testing; consider using Binance testnet or a sub-account with tight limits.
 - Frontend shows the current active symbol, the top candidates from the scanner, and the last auto-trade decision/reason.
+- `MIN_QUOTE_VOLUME` is enforced in `HOME_ASSET` terms (BTC/ETH quote volumes are converted using their `*HOME_ASSET` market).
+- `DAILY_LOSS_CAP_PCT` enables emergency stop when equity drawdown exceeds the threshold (PnL baseline resets daily).
 - News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages).
 - State is persisted to `PERSISTENCE_PATH` (default `./data/state.json`) so the bot resumes last strategies/balances after restart.

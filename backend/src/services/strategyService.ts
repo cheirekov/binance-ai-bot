@@ -16,7 +16,7 @@ const riskSettings: RiskSettings = {
 
 const stateBySymbol: Record<string, StrategyState> = {};
 const persisted = getPersistedState();
-const quoteUsdCache: Record<string, number> = {};
+const quoteToHomeCache: Record<string, { rate: number; fetchedAt: number }> = {};
 let cachedBalances: { fetchedAt: number; balances: Balance[] } | null = null;
 let activeSymbol =
   (config.allowedSymbols.length > 0 ? config.defaultSymbol : persisted.meta?.activeSymbol?.toUpperCase()) ||
@@ -126,6 +126,38 @@ const ensureState = (symbol: string): StrategyState => {
   return stateBySymbol[symbol];
 };
 
+const getQuoteToHomeRate = async (quoteAsset: string, homeAsset: string): Promise<number | null> => {
+  const quote = quoteAsset.toUpperCase();
+  const home = homeAsset.toUpperCase();
+  if (!quote) return null;
+  if (quote === home) return 1;
+
+  const cacheKey = `${quote}_${home}`;
+  const cached = quoteToHomeCache[cacheKey];
+  if (cached && Date.now() - cached.fetchedAt < 60_000) return cached.rate;
+
+  const directSymbol = `${quote}${home}`;
+  try {
+    const snap = await get24hStats(directSymbol);
+    quoteToHomeCache[cacheKey] = { rate: snap.price, fetchedAt: Date.now() };
+    return snap.price;
+  } catch {
+    // ignore
+  }
+
+  const inverseSymbol = `${home}${quote}`;
+  try {
+    const snap = await get24hStats(inverseSymbol);
+    const rate = snap.price > 0 ? 1 / snap.price : null;
+    if (rate) quoteToHomeCache[cacheKey] = { rate, fetchedAt: Date.now() };
+    return rate;
+  } catch {
+    // ignore
+  }
+
+  return null;
+};
+
 export const refreshStrategies = async (symbolInput?: string, options?: { useAi?: boolean }) => {
   const symbol = normalizeSymbol(symbolInput);
   const state = ensureState(symbol);
@@ -136,21 +168,6 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
     const news = await getNewsSentiment();
     const market = await get24hStats(symbol);
     market.quoteAsset = deriveQuoteAsset(symbol);
-    // compute quote USD conversion for BTC/ETH/BNB
-    if (market.quoteAsset && ['BTC', 'ETH', 'BNB'].includes(market.quoteAsset)) {
-      const key = market.quoteAsset;
-      if (!quoteUsdCache[key] || Date.now() - (quoteUsdCache as unknown as Record<string, number>)[`${key}_ts`] > 60_000) {
-        const refSymbol = `${key}USDC`;
-        try {
-          const ref = await get24hStats(refSymbol);
-          quoteUsdCache[key] = ref.price;
-          (quoteUsdCache as unknown as Record<string, number>)[`${key}_ts`] = Date.now();
-        } catch {
-          quoteUsdCache[key] = 1;
-          (quoteUsdCache as unknown as Record<string, number>)[`${key}_ts`] = Date.now();
-        }
-      }
-    }
     state.market = market;
 
     const balances = await cacheBalances();
@@ -158,23 +175,21 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
     const volatilityPct = Math.abs((market.highPrice - market.lowPrice) / market.price) * 100;
     const quoteVol = market.quoteVolume ?? 0;
     const quoteAsset = market.quoteAsset ?? config.quoteAsset;
+    const quoteToHome = await getQuoteToHomeRate(quoteAsset, config.homeAsset);
+    const quoteVolHome = quoteToHome ? quoteVol * quoteToHome : null;
 
     if (volatilityPct > config.maxVolatilityPercent) {
       state.riskFlags.push(`Volatility ${volatilityPct.toFixed(2)}% exceeds cap ${config.maxVolatilityPercent}%`);
     }
-    const stableQuotes = ['USDT', 'USDC', 'USD', 'EUR', 'BUSD'];
-    if (stableQuotes.includes(quoteAsset)) {
-      if (quoteVol < config.minQuoteVolume) {
-        state.riskFlags.push(
-          `Quote volume ${quoteVol.toLocaleString()} below floor ${config.minQuoteVolume.toLocaleString()}`,
-        );
-      }
+    if (quoteVolHome !== null && quoteVolHome < config.minQuoteVolume) {
+      state.riskFlags.push(
+        `Quote volume ${quoteVolHome.toLocaleString(undefined, { maximumFractionDigits: 0 })} ${config.homeAsset} below floor ${config.minQuoteVolume.toLocaleString()}`,
+      );
     }
 
     state.tradeHalted = state.riskFlags.length > 0;
 
-    const quoteUsd = market.quoteAsset && quoteUsdCache[market.quoteAsset] ? quoteUsdCache[market.quoteAsset] : 1;
-    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment, quoteUsd, options);
+    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment, quoteToHome ?? 1, options);
     state.lastUpdated = Date.now();
     state.status = 'ready';
     const snapshot = getStrategyResponse(symbol);
@@ -380,6 +395,7 @@ export const refreshBestSymbol = async () => {
   }
   const balanceFreeByAsset = new Map(balances.map((b) => [b.asset.toUpperCase(), b.free]));
   const hasFree = (asset: string) => (balanceFreeByAsset.get(asset.toUpperCase()) ?? 0) > 0;
+  const homeAsset = config.homeAsset.toUpperCase();
 
   for (const symbol of symbols) {
     try {
@@ -397,18 +413,21 @@ export const refreshBestSymbol = async () => {
 
       // Skip symbols that we can't act on with current wallet (e.g., BUY requires quote balance).
       if (intendedSide === 'BUY' && balances.length > 0 && !hasFree(quoteAsset)) {
-        continue;
+        // Allow if we can convert from HOME_ASSET (conversion happens later during execution).
+        if (!(config.conversionEnabled && hasFree(homeAsset))) continue;
       }
       if (intendedSide === 'SELL' && balances.length > 0 && !hasFree(baseAsset)) {
         continue;
       }
 
       const volPct = Math.abs((snap.highPrice - snap.lowPrice) / snap.price) * 100;
-      const stableQuotes = ['USDT', 'USDC', 'USD', 'EUR', 'BUSD'];
       if (volPct > config.maxVolatilityPercent) continue;
-      if (stableQuotes.includes(quoteAsset) && (snap.quoteVolume ?? 0) < config.minQuoteVolume) continue;
+      const quoteToHome = await getQuoteToHomeRate(quoteAsset, config.homeAsset);
+      if (!quoteToHome) continue;
+      const quoteVolHome = (snap.quoteVolume ?? 0) * quoteToHome;
+      if (quoteVolHome < config.minQuoteVolume) continue;
 
-      const score = scoreSnapshot({ ...snap });
+      const score = scoreSnapshot({ ...snap, quoteVolume: quoteVolHome });
       candidates.push({ symbol, score });
     } catch (error: unknown) {
       const errObj = error as { code?: string; message?: string };

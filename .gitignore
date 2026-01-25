@@ -2,6 +2,7 @@ node_modules
 dist
 coverage
 *.log
+*.logs
 .DS_Store
 .env
 .env.local
