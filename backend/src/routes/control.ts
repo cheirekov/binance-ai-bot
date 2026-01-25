@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
-import { get24hStats, getBalances, placeOrder } from '../binance/client.js';
+import { get24hStats, getBalances, getFuturesPositions, placeOrder } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -25,7 +25,7 @@ type LiquidationAction =
   | {
       asset: string;
       symbol: string;
-      side: 'SELL';
+      side: 'BUY' | 'SELL';
       requestedQty: number;
       orderId?: string | number;
       executedQty?: number;
@@ -84,7 +84,10 @@ export async function controlRoutes(fastify: FastifyInstance) {
     }
 
     const now = Date.now();
-    const dryRun = parseResult.data.dryRun || !config.tradingEnabled;
+    const dryRun =
+      parseResult.data.dryRun ||
+      !config.tradingEnabled ||
+      (config.tradeVenue === 'futures' && !config.futuresEnabled);
 
     if (parseResult.data.stopAutoTrade) {
       persistMeta(persisted, {
@@ -92,6 +95,54 @@ export async function controlRoutes(fastify: FastifyInstance) {
         emergencyStopAt: now,
         emergencyStopReason: 'panic-liquidate',
       });
+    }
+
+    if (config.tradeVenue === 'futures') {
+      // Futures "panic": close all open positions with reduce-only market orders.
+      const actions: LiquidationAction[] = [];
+      const open = await getFuturesPositions();
+      for (const pos of open) {
+        const symbol = pos.symbol.toUpperCase();
+        const qty = Math.abs(pos.positionAmt);
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        const side: 'BUY' | 'SELL' = pos.positionAmt > 0 ? 'SELL' : 'BUY';
+        if (dryRun) {
+          actions.push({ asset: symbol, symbol, side, requestedQty: qty, status: 'simulated' });
+          continue;
+        }
+        try {
+          const order = await placeOrder({ symbol, side, quantity: qty, type: 'MARKET', reduceOnly: true });
+          const executedQty = extractExecutedQty(order) ?? undefined;
+          actions.push({
+            asset: symbol,
+            symbol,
+            side,
+            requestedQty: qty,
+            executedQty,
+            orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+            status: 'placed',
+          });
+        } catch (error) {
+          logger.warn({ err: errorToLogObject(error), symbol }, 'Futures panic close failed');
+          actions.push({ asset: symbol, symbol, status: 'error', reason: errorToString(error) });
+        }
+      }
+
+      const skipped = actions.filter((a) => a.status === 'skipped').length;
+      const errored = actions.filter((a) => a.status === 'error').length;
+      const placed = actions.filter((a) => a.status === 'placed').length;
+
+      const balances = await getBalances();
+      const stillHeld = dryRun ? open.length : (await getFuturesPositions()).length;
+      return {
+        ok: true,
+        dryRun,
+        homeAsset: home,
+        emergencyStop: persisted.meta?.emergencyStop ?? false,
+        summary: { placed, skipped, errored, stillHeld },
+        actions,
+        balances,
+      };
     }
 
     let balances: Balance[];
@@ -204,4 +255,3 @@ export async function controlRoutes(fastify: FastifyInstance) {
     };
   });
 }
-

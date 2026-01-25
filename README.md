@@ -15,6 +15,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
    - EU-friendly quotes: `QUOTE_ASSET=USDC` and `ALLOWED_QUOTES=USDC,EUR`.
    - For full discovery, leave `ALLOWED_SYMBOLS=` empty. If you set `ALLOWED_SYMBOLS`, the bot will only scan/trade within that allow-list.
    - Auto-trading requires both `AUTO_TRADE_ENABLED=true` and `TRADING_ENABLED=true`.
+   - Futures (advanced, higher risk): set `TRADE_VENUE=futures`, provide a key with futures permissions, and set `FUTURES_ENABLED=true`. Start with low leverage (e.g. `FUTURES_LEVERAGE=2`) and test on futures testnet first.
    - Portfolio mode (optional): set `PORTFOLIO_ENABLED=true`, choose `HOME_ASSET` (e.g. `USDC`), and optionally `CONVERSION_ENABLED=true` if you allow auto-converting into BTC/XRP quotes.
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.

@@ -80,6 +80,9 @@ export interface StrategyResponsePayload {
   risk: RiskSettings;
   quoteAsset: string;
   availableSymbols: string[];
+  tradeVenue?: 'spot' | 'futures';
+  futuresEnabled?: boolean;
+  futuresLeverage?: number;
   tradingEnabled?: boolean;
   autoTradeEnabled?: boolean;
   homeAsset?: string;
@@ -127,6 +130,8 @@ export interface PersistedPayload {
       homeAsset?: string;
       notionalHome?: number;
       ocoOrderListId?: number;
+      venue?: 'spot' | 'futures';
+      leverage?: number;
       openedAt: number;
     }
   >;

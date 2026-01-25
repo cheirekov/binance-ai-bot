@@ -12,6 +12,8 @@ export interface SymbolInfo {
   symbol: string;
   baseAsset: string;
   quoteAsset: string;
+  marginAsset?: string;
+  contractType?: string;
   status: string;
   isSpotTradingAllowed?: boolean;
   permissions?: string[];
@@ -34,6 +36,43 @@ export const fetchTradableSymbols = async (): Promise<SymbolInfo[]> => {
   if (cache && now - cache.fetchedAt < ttlMs) return cache.symbols;
 
   try {
+    if (config.tradeVenue === 'futures') {
+      const url = `${config.futuresBaseUrl}/fapi/v1/exchangeInfo`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Futures exchangeInfo failed: HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        symbols: Array<{
+          symbol: string;
+          baseAsset: string;
+          quoteAsset: string;
+          marginAsset?: string;
+          contractType?: string;
+          status: string;
+          filters?: { filterType: string; tickSize?: string; stepSize?: string; minQty?: string; notional?: string; minNotional?: string }[];
+        }>;
+      };
+      const symbols = data.symbols.map((s) => {
+        const lot = s.filters?.find((f) => f.filterType === 'MARKET_LOT_SIZE') ?? s.filters?.find((f) => f.filterType === 'LOT_SIZE');
+        const minNotional = s.filters?.find((f) => f.filterType === 'MIN_NOTIONAL');
+        return {
+          symbol: s.symbol,
+          baseAsset: s.baseAsset,
+          quoteAsset: s.quoteAsset,
+          marginAsset: s.marginAsset,
+          contractType: s.contractType,
+          status: s.status,
+          tickSize: Number(s.filters?.find((f) => f.filterType === 'PRICE_FILTER')?.tickSize ?? 0) || undefined,
+          stepSize: Number(lot?.stepSize ?? 0) || undefined,
+          minQty: Number(lot?.minQty ?? 0) || undefined,
+          minNotional: Number(minNotional?.notional ?? minNotional?.minNotional ?? 0) || undefined,
+        } satisfies SymbolInfo;
+      });
+      cache = { fetchedAt: now, symbols };
+      return symbols;
+    }
+
     const { data } = await client.exchangeInfo();
     const symbols = data.symbols.map(
       (s: {

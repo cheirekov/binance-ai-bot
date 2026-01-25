@@ -30,6 +30,11 @@ const boolFromEnv = (value: string | undefined, fallback = false): boolean => {
   return value.toLowerCase() === 'true';
 };
 
+const tradeVenueFromEnv = (value: string | undefined): 'spot' | 'futures' => {
+  const v = (value ?? 'spot').toLowerCase();
+  return v === 'futures' ? 'futures' : 'spot';
+};
+
 export const config = {
   env: process.env.NODE_ENV ?? 'development',
   port: numberFromEnv(process.env.PORT, 8788),
@@ -37,6 +42,13 @@ export const config = {
   binanceApiKey: process.env.BINANCE_API_KEY ?? '',
   binanceApiSecret: process.env.BINANCE_API_SECRET ?? '',
   binanceBaseUrl: process.env.BINANCE_BASE_URL ?? 'https://api.binance.com',
+  tradeVenue: tradeVenueFromEnv(process.env.TRADE_VENUE),
+  futuresEnabled: boolFromEnv(process.env.FUTURES_ENABLED, false),
+  futuresBaseUrl: process.env.FUTURES_BASE_URL ?? 'https://fapi.binance.com',
+  futuresLeverage: Math.max(1, Math.min(125, numberFromEnv(process.env.FUTURES_LEVERAGE, 2))),
+  futuresMarginType: ((process.env.FUTURES_MARGIN_TYPE ?? 'ISOLATED').toUpperCase() === 'CROSSED'
+    ? 'CROSSED'
+    : 'ISOLATED') as 'ISOLATED' | 'CROSSED',
   tradingEnabled: boolFromEnv(process.env.TRADING_ENABLED, false),
   openAiApiKey: process.env.OPENAI_API_KEY ?? '',
   openAiModel: process.env.OPENAI_MODEL ?? 'gpt-4.1-mini',
@@ -76,11 +88,11 @@ export const config = {
   autoTradeCooldownMinutes: numberFromEnv(process.env.AUTO_TRADE_COOLDOWN_MINUTES, 90),
   dailyLossCapPct: numberFromEnv(process.env.DAILY_LOSS_CAP_PCT, 3),
   slippageBps: numberFromEnv(process.env.SLIPPAGE_BPS, 8),
-  ocoEnabled: boolFromEnv(process.env.OCO_ENABLED, true),
+  ocoEnabled: boolFromEnv(process.env.OCO_ENABLED, true) && tradeVenueFromEnv(process.env.TRADE_VENUE) !== 'futures',
   portfolioEnabled: boolFromEnv(process.env.PORTFOLIO_ENABLED, false),
   portfolioMaxAllocPct: numberFromEnv(process.env.PORTFOLIO_MAX_ALLOC_PCT, 50),
   portfolioMaxPositions: numberFromEnv(process.env.PORTFOLIO_MAX_POSITIONS, 3),
-  conversionEnabled: boolFromEnv(process.env.CONVERSION_ENABLED, false),
+  conversionEnabled: boolFromEnv(process.env.CONVERSION_ENABLED, false) && tradeVenueFromEnv(process.env.TRADE_VENUE) !== 'futures',
   riskOffSentiment: numberFromEnv(process.env.RISK_OFF_SENTIMENT, -0.5),
   apiKey: process.env.API_KEY ?? '',
   clientKey: process.env.CLIENT_KEY ?? '',

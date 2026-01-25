@@ -52,6 +52,14 @@ const isStableToStablePair = (baseAsset: string, quoteAsset: string) =>
 const accountBlacklistSet = () =>
   new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
 
+const isVenueTradable = (s: Awaited<ReturnType<typeof fetchTradableSymbols>>[number]) => {
+  if (config.tradeVenue === 'futures') {
+    // USD-M futures exchangeInfo contains contractType; we only trade perpetual contracts.
+    return s.status === 'TRADING' && (s.contractType ? s.contractType === 'PERPETUAL' : true);
+  }
+  return s.status === 'TRADING' && ((s.permissions?.includes('SPOT') ?? false) || s.isSpotTradingAllowed);
+};
+
 const ensureActiveSymbolAllowed = () => {
   const blocked = accountBlacklistSet();
   const activeUpper = activeSymbol.toUpperCase();
@@ -155,6 +163,36 @@ const getQuoteToHomeRate = async (quoteAsset: string, homeAsset: string): Promis
     // ignore
   }
 
+  // Fallback to spot conversion pairs (useful when running futures venue but HOME_ASSET is USDC/EUR).
+  try {
+    const res = await fetch(`${config.binanceBaseUrl}/api/v3/ticker/price?symbol=${encodeURIComponent(directSymbol)}`);
+    if (res.ok) {
+      const data = (await res.json()) as { price?: string };
+      const price = data?.price ? Number(data.price) : Number.NaN;
+      if (Number.isFinite(price) && price > 0) {
+        quoteToHomeCache[cacheKey] = { rate: price, fetchedAt: Date.now() };
+        return price;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const res = await fetch(`${config.binanceBaseUrl}/api/v3/ticker/price?symbol=${encodeURIComponent(inverseSymbol)}`);
+    if (res.ok) {
+      const data = (await res.json()) as { price?: string };
+      const price = data?.price ? Number(data.price) : Number.NaN;
+      if (Number.isFinite(price) && price > 0) {
+        const rate = 1 / price;
+        quoteToHomeCache[cacheKey] = { rate, fetchedAt: Date.now() };
+        return rate;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   return null;
 };
 
@@ -230,6 +268,9 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
         : Object.keys(stateBySymbol);
   const availableSymbols = universeSymbols.filter((s) => !blocked.has(s.toUpperCase()));
   const rankedCandidates = lastCandidates.filter((c) => !blocked.has(c.symbol.toUpperCase()));
+  const positionsForVenue = Object.fromEntries(
+    Object.entries(persisted.positions).filter(([, p]) => (p?.venue ?? 'spot') === config.tradeVenue),
+  );
   return {
     status: state.status,
     symbol,
@@ -238,6 +279,9 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     strategies: state.strategies,
     risk: riskSettings,
     quoteAsset: config.quoteAsset,
+    tradeVenue: config.tradeVenue,
+    futuresEnabled: config.futuresEnabled,
+    futuresLeverage: config.futuresLeverage,
     emergencyStop: persisted.meta?.emergencyStop ?? false,
     emergencyStopAt: persisted.meta?.emergencyStopAt,
     emergencyStopReason: persisted.meta?.emergencyStopReason,
@@ -253,7 +297,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     autoSelectUpdatedAt: lastAutoSelectAt,
     rankedCandidates: rankedCandidates.slice(0, 25),
     lastAutoTrade: persisted.meta?.lastAutoTrade,
-    positions: persisted.positions,
+    positions: positionsForVenue,
     equity: persisted.meta?.equity,
     lastUpdated: state.lastUpdated,
     error: state.error,
@@ -295,8 +339,7 @@ export const refreshBestSymbol = async () => {
       discovered = exchangeSymbols
         .filter(
           (s) =>
-            s.status === 'TRADING' &&
-            (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
+            isVenueTradable(s) &&
             config.allowedQuoteAssets.includes(s.quoteAsset.toUpperCase()) &&
             !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
             !isStableToStablePair(s.baseAsset, s.quoteAsset) &&
@@ -319,8 +362,7 @@ export const refreshBestSymbol = async () => {
         exchangeSymbols
           .filter(
             (s) =>
-              s.status === 'TRADING' &&
-              (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
+              isVenueTradable(s) &&
               !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
               !looksLeverageToken(s.symbol),
           )

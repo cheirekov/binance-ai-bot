@@ -182,8 +182,11 @@ function App() {
 
   const onPanic = async () => {
     const home = data?.homeAsset ?? 'HOME_ASSET';
+    const venue = data?.tradeVenue ?? 'spot';
     const confirmed = window.confirm(
-      `Panic liquidate: this will MARKET-SELL all free spot balances into ${home} where a direct market exists.\n\nThis also enables Emergency Stop to prevent re-entry.\n\nContinue?`,
+      venue === 'futures'
+        ? `Panic: this will MARKET-close all open futures positions (reduce-only).\n\nThis also enables Emergency Stop to prevent re-entry.\n\nContinue?`
+        : `Panic liquidate: this will MARKET-SELL all free spot balances into ${home} where a direct market exists.\n\nThis also enables Emergency Stop to prevent re-entry.\n\nContinue?`,
     );
     if (!confirmed) return;
 
@@ -289,6 +292,14 @@ function App() {
               Live trading: {data?.tradingEnabled ? 'on' : 'off'} · Auto-trade: {data?.autoTradeEnabled ? 'on' : 'off'}
             </p>
           )}
+          {data?.tradeVenue && (
+            <p className="muted">
+              Venue: {data.tradeVenue}
+              {data.tradeVenue === 'futures'
+                ? ` · Futures: ${data.futuresEnabled ? 'on' : 'off'}${data.futuresLeverage ? ` · Leverage: ${data.futuresLeverage}x` : ''}`
+                : ''}
+            </p>
+          )}
           {(data?.portfolioEnabled !== undefined || data?.conversionEnabled !== undefined) && (
             <p className="muted">
               Portfolio: {data?.portfolioEnabled ? `on (${data?.portfolioMaxAllocPct ?? '—'}% / ${data?.portfolioMaxPositions ?? '—'} pos)` : 'off'}
@@ -318,7 +329,7 @@ function App() {
             <p className="muted">
               Open positions:{' '}
               {openPositions
-                .map((p) => `${p.symbol.toUpperCase()} (${p.horizon})`)
+                .map((p) => `${p.symbol.toUpperCase()} (${p.side === 'SELL' ? 'short' : 'long'} · ${p.horizon})`)
                 .join(', ')}
             </p>
           )}
@@ -355,7 +366,11 @@ function App() {
               Sim sell {tradeQuantity || '—'}
             </button>
             <button className="btn danger" onClick={onPanic} disabled={panicRunning}>
-              {panicRunning ? 'Liquidating…' : `Panic: liquidate to ${data?.homeAsset ?? 'HOME'}`}
+              {panicRunning
+                ? 'Running…'
+                : data?.tradeVenue === 'futures'
+                  ? 'Panic: close futures'
+                  : `Panic: liquidate to ${data?.homeAsset ?? 'HOME'}`}
             </button>
             <button className="btn ghost" onClick={toggleEmergencyStop} disabled={refreshing}>
               {data?.emergencyStop ? 'Resume auto-trade' : 'Emergency stop'}

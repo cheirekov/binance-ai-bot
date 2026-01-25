@@ -56,6 +56,9 @@ export interface StrategyResponse {
     feeRate: { maker: number; taker: number };
   };
   availableSymbols: string[];
+  tradeVenue?: 'spot' | 'futures';
+  futuresEnabled?: boolean;
+  futuresLeverage?: number;
   tradingEnabled?: boolean;
   autoTradeEnabled?: boolean;
   homeAsset?: string;
@@ -112,7 +115,7 @@ export interface PanicLiquidateResponse {
   emergencyStop: boolean;
   summary: { placed: number; skipped: number; errored: number; stillHeld: number };
   actions: Array<
-    | { asset: string; symbol: string; side: 'SELL'; requestedQty: number; status: 'placed' | 'simulated'; orderId?: string | number; executedQty?: number }
+    | { asset: string; symbol: string; side: 'BUY' | 'SELL'; requestedQty: number; status: 'placed' | 'simulated'; orderId?: string | number; executedQty?: number }
     | { asset: string; status: 'skipped'; reason: string }
     | { asset: string; symbol?: string; status: 'error'; reason: string }
   >;

@@ -87,6 +87,14 @@ export async function strategyRoutes(fastify: FastifyInstance) {
       return { error: 'Trading halted due to risk flags', riskFlags: state.riskFlags };
     }
 
+    if (config.tradeVenue === 'futures' && !config.futuresEnabled) {
+      return {
+        simulated: true,
+        note: 'Futures trading disabled. Enable with FUTURES_ENABLED=true.',
+        requested: orderPayload,
+      };
+    }
+
     if (!config.tradingEnabled) {
       return {
         simulated: true,
