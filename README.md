@@ -59,5 +59,5 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - Frontend shows the current active symbol, the top candidates from the scanner, and the last auto-trade decision/reason.
 - `MIN_QUOTE_VOLUME` is enforced in `HOME_ASSET` terms (BTC/ETH quote volumes are converted using their `*HOME_ASSET` market).
 - `DAILY_LOSS_CAP_PCT` enables emergency stop when equity drawdown exceeds the threshold (PnL baseline resets daily).
-- News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages).
+- News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages). Many sites (including Binance news pages) serve HTML and/or block server-side fetches.
 - State is persisted to `PERSISTENCE_PATH` (default `./data/state.json`) so the bot resumes last strategies/balances after restart.

@@ -39,7 +39,12 @@ const fetchFeedSafely = async (feedUrl: string) => {
   const body = await res.text();
   const trimmed = body.trimStart();
   const headLower = trimmed.slice(0, 200).toLowerCase();
-  const looksXml = headLower.startsWith('<?xml') || headLower.startsWith('<rss') || headLower.startsWith('<feed');
+  const looksXml =
+    headLower.startsWith('<?xml') ||
+    headLower.startsWith('<rss') ||
+    headLower.startsWith('<feed') ||
+    headLower.startsWith('<rdf:rdf') ||
+    headLower.startsWith('<rdf');
   if (!looksXml) {
     throw new Error(`Non-RSS response (content-type: ${contentType || 'unknown'})`);
   }
