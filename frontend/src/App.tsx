@@ -337,7 +337,11 @@ function App() {
           {(data?.portfolioEnabled !== undefined || data?.conversionEnabled !== undefined) && (
             <p className="muted">
               Portfolio: {data?.portfolioEnabled ? `on (${data?.portfolioMaxAllocPct ?? '—'}% / ${data?.portfolioMaxPositions ?? '—'} pos)` : 'off'}
-              {data?.conversionEnabled !== undefined ? ` · Conversions: ${data.conversionEnabled ? 'on' : 'off'}` : ''}
+              {data?.conversionEnabled !== undefined
+                ? ` · Conversions: ${
+                    data.tradeVenue === 'futures' ? 'n/a (futures)' : data.conversionEnabled ? 'on' : 'off'
+                  }`
+                : ''}
               {data?.homeAsset ? ` · Home: ${data.homeAsset}` : ''}
             </p>
           )}
@@ -444,7 +448,7 @@ function App() {
             </div>
           </div>
           <div className="market-card">
-            <p className="label">Balances</p>
+            <p className="label">{data?.tradeVenue === 'futures' ? 'Futures balances' : 'Balances'}</p>
             {data?.balances && data.balances.length > 0 ? (
               <div className="balance-list">
                 {data.balances.map((balance) => (

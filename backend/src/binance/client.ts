@@ -472,15 +472,9 @@ export const getFuturesEquity = async (): Promise<{ asset: string; equity: numbe
   if (!isFuturesVenue()) return null;
   try {
     const account = await getFuturesAccount();
-    // On USD-M futures, totals are denominated in the margin asset (usually USDT). If HOME_ASSET differs,
-    // approximate conversion using spot pricing so UI/PnL are not mislabeled.
-    const marginAsset =
-      account.assets?.reduce<{ asset: string; wallet: number } | null>((best, a) => {
-        const wallet = Number(a.walletBalance);
-        if (!Number.isFinite(wallet)) return best;
-        if (!best || wallet > best.wallet) return { asset: a.asset.toUpperCase(), wallet };
-        return best;
-      }, null)?.asset ?? 'USDT';
+    // USD-M futures (fapi) totals are returned in USDT-equivalent terms, even in multi-asset mode.
+    // Treat them as USDT and only convert to HOME_ASSET if HOME_ASSET differs.
+    const marginAsset = 'USDT';
     const totalMargin = Number(account.totalMarginBalance ?? Number.NaN);
     const rawEquity = Number.isFinite(totalMargin) && totalMargin > 0 ? totalMargin : null;
     const wallet = Number(account.totalWalletBalance ?? Number.NaN);

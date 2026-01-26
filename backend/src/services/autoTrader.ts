@@ -275,11 +275,25 @@ const updateEquityTelemetry = async () => {
       if (!Number.isFinite(totalHome) || totalHome <= 0) return;
     }
 
-    const prevMatches = prev && prev.homeAsset?.toUpperCase() === home;
+    const prevMatches = !!prev && prev.homeAsset?.toUpperCase() === home;
     const sameDay =
-      prevMatches && Number.isFinite(prev.startAt) ? new Date(prev.startAt).toISOString().slice(0, 10) === todayKey() : false;
-    const startAt = prevMatches && sameDay && Number.isFinite(prev.startAt) ? prev.startAt : now;
-    const startHome = prevMatches && sameDay && Number.isFinite(prev.startHome) && prev.startHome > 0 ? prev.startHome : totalHome;
+      prevMatches && prev && Number.isFinite(prev.startAt)
+        ? new Date(prev.startAt).toISOString().slice(0, 10) === todayKey()
+        : false;
+    const prevStartAt = prevMatches && sameDay && prev && Number.isFinite(prev.startAt) ? prev.startAt : null;
+    const prevStartHome = prevMatches && sameDay && prev && Number.isFinite(prev.startHome) && prev.startHome > 0 ? prev.startHome : null;
+    const scaleJump =
+      prevStartHome !== null && Number.isFinite(totalHome) && totalHome > 0
+        ? prevStartHome > totalHome * 50 || totalHome > prevStartHome * 50
+        : false;
+    if (scaleJump) {
+      logger.warn(
+        { prevStartHome, nextTotalHome: totalHome, homeAsset: home },
+        'Equity baseline reset due to large scale jump (likely config/venue change)',
+      );
+    }
+    const startAt = prevStartAt !== null && !scaleJump ? prevStartAt : now;
+    const startHome = prevStartHome !== null && !scaleJump ? prevStartHome : totalHome;
     const pnlHome = totalHome - startHome;
     const pnlPct = startHome > 0 ? (pnlHome / startHome) * 100 : 0;
 
@@ -457,7 +471,14 @@ const countOpenPositions = () => Object.values(persisted.positions).filter((p) =
 
 const allocatedHome = () =>
   Object.values(persisted.positions).reduce(
-    (sum, p) => (p && isCountablePositionForVenue(p) ? sum + (p.notionalHome ?? 0) : sum),
+    (sum, p) => {
+      if (!p || !isCountablePositionForVenue(p)) return sum;
+      const notional = p.notionalHome ?? 0;
+      if (!Number.isFinite(notional) || notional <= 0) return sum;
+      if (config.tradeVenue !== 'futures') return sum + notional;
+      const leverage = Math.max(1, p.leverage ?? config.futuresLeverage ?? 1);
+      return sum + notional / leverage;
+    },
     0,
   );
 
@@ -736,8 +757,15 @@ const portfolioTick = async (seedSymbol?: string) => {
 
   const home = config.homeAsset.toUpperCase();
   const freeBy = balanceMap(balances);
-  const freeHome = freeBy.get(home) ?? 0;
-  const maxAllocHome = (freeHome * config.portfolioMaxAllocPct) / 100;
+  let allocBaseHome = freeBy.get(home) ?? 0;
+  if (config.tradeVenue === 'futures') {
+    const futuresEq = await getFuturesEquity();
+    if (futuresEq && futuresEq.asset.toUpperCase() === home && Number.isFinite(futuresEq.equity) && futuresEq.equity > 0) {
+      // Use total margin balance (USDT-equivalent) as the allocation base, since futures collateral may not be held as HOME_ASSET.
+      allocBaseHome = futuresEq.equity;
+    }
+  }
+  const maxAllocHome = (allocBaseHome * config.portfolioMaxAllocPct) / 100;
   const blockedSymbols = accountBlacklistSet();
 
   // Global risk-off on negative sentiment (cached by news service).
@@ -884,23 +912,29 @@ const portfolioTick = async (seedSymbol?: string) => {
     let quantity = entry.size;
     if (!Number.isFinite(quantity) || quantity <= 0) continue;
 
-    const maxQtyByAlloc = remaining / (price * quoteToHome * buffer);
+    const leverage = config.tradeVenue === 'futures' ? Math.max(1, config.futuresLeverage) : 1;
+    const maxQtyByAlloc =
+      config.tradeVenue === 'futures'
+        ? (remaining * leverage) / (price * quoteToHome * buffer)
+        : remaining / (price * quoteToHome * buffer);
     quantity = Math.min(quantity, maxQtyByAlloc);
     if (!Number.isFinite(quantity) || quantity <= 0) continue;
 
-    const requiredQuote = quantity * price * buffer;
-    const ensured = await ensureQuoteAsset(symbols, balances, home, quoteAsset, requiredQuote);
-    balances = ensured.balances;
-    if (ensured.note && ensured.note.startsWith('Conversions disabled')) continue;
-    if (ensured.note && ensured.note.startsWith('No conversion path')) continue;
-    if (ensured.note && ensured.note.startsWith('Conversion failed')) continue;
+    if (config.tradeVenue !== 'futures') {
+      const requiredQuote = quantity * price * buffer;
+      const ensured = await ensureQuoteAsset(symbols, balances, home, quoteAsset, requiredQuote);
+      balances = ensured.balances;
+      if (ensured.note && ensured.note.startsWith('Conversions disabled')) continue;
+      if (ensured.note && ensured.note.startsWith('No conversion path')) continue;
+      if (ensured.note && ensured.note.startsWith('Conversion failed')) continue;
 
-    const freeNow = balanceMap(balances);
-    const freeQuote = freeNow.get(quoteAsset) ?? 0;
-    const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
-    quantity = Math.min(quantity, maxAffordable);
-    if (!Number.isFinite(quantity) || quantity <= 0) {
-      continue;
+      const freeNow = balanceMap(balances);
+      const freeQuote = freeNow.get(quoteAsset) ?? 0;
+      const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
+      quantity = Math.min(quantity, maxAffordable);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        continue;
+      }
     }
 
     try {
@@ -1136,21 +1170,29 @@ const singleSymbolTick = async (symbol?: string) => {
   const price = state.market.price;
   let quantity = entry.size;
   const buffer = 1 + 0.002 + config.slippageBps / 10000;
-  const requiredQuote = quantity * price * buffer;
-  const ensured = await ensureQuoteAsset(symbols, balances, home, quoteAsset, requiredQuote);
-  balances = ensured.balances;
-  if (ensured.note && ensured.note.startsWith('Conversions disabled')) {
-    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: ensured.note });
-    return;
-  }
+  if (config.tradeVenue !== 'futures') {
+    const requiredQuote = quantity * price * buffer;
+    const ensured = await ensureQuoteAsset(symbols, balances, home, quoteAsset, requiredQuote);
+    balances = ensured.balances;
+    if (ensured.note && ensured.note.startsWith('Conversions disabled')) {
+      recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: ensured.note });
+      return;
+    }
 
-  const freeNow = balanceMap(balances);
-  const freeQuote = freeNow.get(quoteAsset) ?? 0;
-  const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
-  quantity = Math.min(quantity, maxAffordable);
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `Insufficient ${quoteAsset} to trade` });
-    return;
+    const freeNow = balanceMap(balances);
+    const freeQuote = freeNow.get(quoteAsset) ?? 0;
+    const maxAffordable = freeQuote > 0 ? freeQuote / (price * buffer) : 0;
+    quantity = Math.min(quantity, maxAffordable);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      recordDecision({
+        at: now,
+        symbol: state.symbol,
+        horizon,
+        action: 'skipped',
+        reason: `Insufficient ${quoteAsset} to trade`,
+      });
+      return;
+    }
   }
 
   try {

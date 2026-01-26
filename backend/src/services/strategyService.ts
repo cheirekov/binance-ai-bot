@@ -453,13 +453,16 @@ export const refreshBestSymbol = async () => {
               ? 'BUY'
               : 'SELL';
 
-      // Skip symbols that we can't act on with current wallet (e.g., BUY requires quote balance).
-      if (intendedSide === 'BUY' && balances.length > 0 && !hasFree(quoteAsset)) {
-        // Allow if we can convert from HOME_ASSET (conversion happens later during execution).
-        if (!(config.conversionEnabled && hasFree(homeAsset))) continue;
-      }
-      if (intendedSide === 'SELL' && balances.length > 0 && !hasFree(baseAsset)) {
-        continue;
+      // Spot wallet-aware constraints: futures positions use shared margin and don't require holding base/quote.
+      if (config.tradeVenue !== 'futures') {
+        // Skip symbols that we can't act on with current wallet (e.g., BUY requires quote balance).
+        if (intendedSide === 'BUY' && balances.length > 0 && !hasFree(quoteAsset)) {
+          // Allow if we can convert from HOME_ASSET (conversion happens later during execution).
+          if (!(config.conversionEnabled && hasFree(homeAsset))) continue;
+        }
+        if (intendedSide === 'SELL' && balances.length > 0 && !hasFree(baseAsset)) {
+          continue;
+        }
       }
 
       const volPct = Math.abs((snap.highPrice - snap.lowPrice) / snap.price) * 100;
