@@ -367,7 +367,7 @@ function App() {
             <p className="muted">
               Open positions:{' '}
               {openPositions
-                .map((p) => `${p.symbol.toUpperCase()} (${p.side === 'SELL' ? 'short' : 'long'} · ${p.horizon})`)
+                .map((p) => `${p.symbol.toUpperCase()} (${p.side === 'SELL' ? 'short' : 'long'}, ${p.horizon} horizon)`)
                 .join(', ')}
             </p>
           )}

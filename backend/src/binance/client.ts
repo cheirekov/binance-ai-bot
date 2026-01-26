@@ -378,6 +378,22 @@ export const cancelOcoOrder = async (symbol: string, orderListId: number) => {
   return data;
 };
 
+export const getOpenOcoOrders = async (): Promise<unknown[]> => {
+  if (isFuturesVenue()) {
+    throw new Error('OCO is only supported in spot mode');
+  }
+  const { data } = await client.getOpenOCOOrders();
+  return Array.isArray(data) ? (data as unknown[]) : [];
+};
+
+export const getOcoOrder = async (orderListId: number): Promise<unknown> => {
+  if (isFuturesVenue()) {
+    throw new Error('OCO is only supported in spot mode');
+  }
+  const { data } = await client.getOCOOrder({ orderListId });
+  return data;
+};
+
 export const placeOrder = async (params: TradeParams) => {
   if (!config.tradingEnabled) {
     throw new Error('Trading is disabled; set TRADING_ENABLED=true to place live orders.');
