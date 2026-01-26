@@ -1,11 +1,11 @@
-import crypto from 'crypto';
 import { Spot } from '@binance/connector';
+import crypto from 'crypto';
 
-import { fetchTradableSymbols } from './exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, MarketSnapshot } from '../types.js';
 import { errorToLogObject } from '../utils/errors.js';
+import { fetchTradableSymbols } from './exchangeInfo.js';
 
 const client = new Spot(config.binanceApiKey, config.binanceApiSecret, {
   baseURL: config.binanceBaseUrl,

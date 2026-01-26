@@ -10,11 +10,11 @@ import {
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
-import { getNewsSentiment } from './newsService.js';
-import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
+import { getNewsSentiment } from './newsService.js';
+import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
+import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 
 const persisted = getPersistedState();
 

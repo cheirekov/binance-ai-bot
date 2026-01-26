@@ -59,8 +59,6 @@ const extractExecutedQty = (order: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
-const toMap = (balances: Balance[]) => new Map(balances.map((b) => [b.asset.toUpperCase(), b]));
-
 export async function controlRoutes(fastify: FastifyInstance) {
   fastify.post('/bot/emergency-stop', async (request) => {
     const parseResult = emergencyStopSchema.safeParse(request.body);
@@ -323,7 +321,6 @@ export async function controlRoutes(fastify: FastifyInstance) {
     }
 
     const symbols = await fetchTradableSymbols();
-    const byAsset = toMap(balances);
 
     const actions: LiquidationAction[] = [];
     const targets = balances

@@ -1,8 +1,8 @@
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { errorToLogObject } from '../utils/errors.js';
 import { autoTradeTick } from './autoTrader.js';
 import { refreshBestSymbol, refreshStrategies } from './strategyService.js';
-import { errorToLogObject } from '../utils/errors.js';
 
 let timer: NodeJS.Timeout | null = null;
 
