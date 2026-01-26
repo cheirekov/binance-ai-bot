@@ -759,6 +759,15 @@ const portfolioTick = async (seedSymbol?: string) => {
   const freeBy = balanceMap(balances);
   let allocBaseHome = freeBy.get(home) ?? 0;
   if (config.tradeVenue === 'futures') {
+    const cachedEq = persisted.meta?.equity;
+    if (
+      cachedEq &&
+      cachedEq.homeAsset?.toUpperCase() === home &&
+      Number.isFinite(cachedEq.lastHome) &&
+      cachedEq.lastHome > 0
+    ) {
+      allocBaseHome = cachedEq.lastHome;
+    }
     const futuresEq = await getFuturesEquity();
     if (futuresEq && futuresEq.asset.toUpperCase() === home && Number.isFinite(futuresEq.equity) && futuresEq.equity > 0) {
       // Use total margin balance (USDT-equivalent) as the allocation base, since futures collateral may not be held as HOME_ASSET.
