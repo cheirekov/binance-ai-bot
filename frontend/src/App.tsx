@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
+  applyAiTuning,
   autoSelectSymbol,
   executeTrade,
   fetchStrategy,
@@ -82,6 +83,7 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [panicRunning, setPanicRunning] = useState(false);
   const [sweepRunning, setSweepRunning] = useState(false);
+  const [tuningRunning, setTuningRunning] = useState(false);
   const [gridRunning, setGridRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
@@ -325,6 +327,68 @@ function App() {
     }
   };
 
+  const aiDecision = data?.aiPolicy?.lastDecision;
+  const aiTune = aiDecision?.tune;
+  const hasAiTune = !!aiTune && Object.keys(aiTune).length > 0;
+  const aiWantsSweep = aiDecision?.sweepUnusedToHome ?? false;
+  const tuneAlreadyApplied =
+    hasAiTune && !!aiDecision && !!data?.runtimeConfig?.updatedAt && data.runtimeConfig.updatedAt >= aiDecision.at;
+
+  const tuneSummary = useMemo(() => {
+    if (!aiTune) return '';
+    const parts: string[] = [];
+    if (aiTune.minQuoteVolume !== undefined) parts.push(`MIN_QUOTE_VOLUME→${aiTune.minQuoteVolume.toLocaleString()}`);
+    if (aiTune.maxVolatilityPercent !== undefined) parts.push(`MAX_VOLATILITY_PCT→${aiTune.maxVolatilityPercent}`);
+    if (aiTune.autoTradeHorizon) parts.push(`AUTO_TRADE_HORIZON→${aiTune.autoTradeHorizon}`);
+    if (aiTune.portfolioMaxAllocPct !== undefined) parts.push(`PORTFOLIO_MAX_ALLOC_PCT→${aiTune.portfolioMaxAllocPct}`);
+    if (aiTune.portfolioMaxPositions !== undefined) parts.push(`PORTFOLIO_MAX_POSITIONS→${aiTune.portfolioMaxPositions}`);
+    if (aiTune.gridMaxAllocPct !== undefined) parts.push(`GRID_MAX_ALLOC_PCT→${aiTune.gridMaxAllocPct}`);
+    return parts.join(', ');
+  }, [aiTune]);
+
+  const runtimeSummary = useMemo(() => {
+    const cfg = data?.runtimeConfig?.values;
+    if (!cfg) return '';
+    const parts: string[] = [];
+    if (cfg.minQuoteVolume !== undefined) parts.push(`MIN_QUOTE_VOLUME=${cfg.minQuoteVolume.toLocaleString()}`);
+    if (cfg.maxVolatilityPercent !== undefined) parts.push(`MAX_VOLATILITY_PCT=${cfg.maxVolatilityPercent}`);
+    if (cfg.autoTradeHorizon) parts.push(`AUTO_TRADE_HORIZON=${cfg.autoTradeHorizon}`);
+    if (cfg.portfolioMaxAllocPct !== undefined) parts.push(`PORTFOLIO_MAX_ALLOC_PCT=${cfg.portfolioMaxAllocPct}`);
+    if (cfg.portfolioMaxPositions !== undefined) parts.push(`PORTFOLIO_MAX_POSITIONS=${cfg.portfolioMaxPositions}`);
+    if (cfg.gridMaxAllocPct !== undefined) parts.push(`GRID_MAX_ALLOC_PCT=${cfg.gridMaxAllocPct}`);
+    return parts.join(', ');
+  }, [data?.runtimeConfig?.values]);
+
+  const onApplyAiTuning = async () => {
+    if (!hasAiTune || !aiDecision) return;
+    const confirmed = window.confirm(
+      `Apply AI tuning now?\n\nThis updates the bot's runtime settings immediately and persists them in state.json.\n\nSuggested: ${tuneSummary || '(none)'}\n\nContinue?`,
+    );
+    if (!confirmed) return;
+
+    setTuningRunning(true);
+    setTradeMessage(null);
+    try {
+      const res = await applyAiTuning();
+      if (!res.ok) {
+        setError(res.error ?? 'AI tuning apply failed. Check logs.');
+      } else {
+        setTradeMessage(`AI tuning applied: ${tuneSummary || 'ok'}`);
+      }
+    } catch (err) {
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `AI tuning error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'AI tuning apply failed. Check logs.';
+      setError(message);
+    } finally {
+      setTuningRunning(false);
+      void load(selectedSymbol);
+    }
+  };
+
   const market = data?.market;
   const quote = market?.quoteAsset ?? data?.quoteAsset;
   const openPositions = useMemo(() => {
@@ -434,6 +498,20 @@ function App() {
                 : ''}
             </p>
           )}
+          {data?.aiPolicy?.lastDecision?.reason ? <p className="muted">AI: {data.aiPolicy.lastDecision.reason}</p> : null}
+          {hasAiTune ? <p className="muted">AI tuning suggested: {tuneSummary}</p> : null}
+          {aiWantsSweep ? (
+            <p className="muted">
+              AI suggests: sweep unused → {data?.homeAsset ?? 'HOME'} (you can run it via the button below)
+            </p>
+          ) : null}
+          {data?.runtimeConfig?.values && runtimeSummary ? (
+            <p className="muted">
+              Runtime overrides: {runtimeSummary}
+              {data.runtimeConfig.updatedAt ? ` · updated ${new Date(data.runtimeConfig.updatedAt).toLocaleTimeString()}` : ''}
+              {data.runtimeConfig.source ? ` · ${data.runtimeConfig.source}` : ''}
+            </p>
+          ) : null}
           {data?.equity && (
             <p className="muted">
               Equity {data.equity.lastHome.toLocaleString(undefined, { maximumFractionDigits: 2 })} {data.equity.homeAsset} · PnL{' '}
@@ -492,6 +570,11 @@ function App() {
             <button className="btn soft" onClick={() => simulateTrade('SELL')} disabled={data?.tradeHalted}>
               Sim sell {tradeQuantity || '—'}
             </button>
+            {hasAiTune && (
+              <button className="btn soft" onClick={onApplyAiTuning} disabled={tuningRunning || tuneAlreadyApplied}>
+                {tuningRunning ? 'Applying AI tuning…' : tuneAlreadyApplied ? 'AI tuning applied' : 'Apply AI tuning'}
+              </button>
+            )}
             <button className="btn soft" onClick={onSweepUnused} disabled={sweepRunning || data?.tradeVenue === 'futures'}>
               {sweepRunning ? 'Sweeping…' : `Sweep unused → ${data?.homeAsset ?? 'HOME'}`}
             </button>

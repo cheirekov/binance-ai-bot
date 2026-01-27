@@ -3,10 +3,11 @@ import { z } from 'zod';
 
 import { get24hStats, getBalances, getFuturesPositions, placeOrder } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
-import { config } from '../config.js';
+import { applyRuntimeConfigOverrides, config } from '../config.js';
 import { logger } from '../logger.js';
 import { startGrid, stopGrid } from '../services/gridTrader.js';
 import { getPersistedState, persistMeta } from '../services/persistence.js';
+import { sweepUnusedToHome } from '../services/sweepUnused.js';
 import { Balance } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 
@@ -32,6 +33,10 @@ const sweepSchema = z.object({
 
 const gridSymbolSchema = z.object({
   symbol: z.string().min(5).max(20),
+});
+
+const aiTuningApplySchema = z.object({
+  dryRun: z.boolean().optional().default(false),
 });
 
 type LiquidationAction =
@@ -116,6 +121,44 @@ export async function controlRoutes(fastify: FastifyInstance) {
     const res = await stopGrid(parseResult.data.symbol);
     if (!res.ok) reply.status(400);
     return res;
+  });
+
+  fastify.post('/ai-policy/apply-tuning', async (request, reply) => {
+    const parseResult = aiTuningApplySchema.safeParse(request.body ?? {});
+    if (!parseResult.success) {
+      reply.status(400);
+      return { error: parseResult.error.flatten() };
+    }
+
+    const decision = persisted.meta?.aiPolicy?.lastDecision;
+    const tune = decision?.tune;
+    if (!decision || !tune || Object.keys(tune).length === 0) {
+      reply.status(400);
+      return { error: 'No AI tuning suggestion to apply.' };
+    }
+
+    const now = Date.now();
+    if (parseResult.data.dryRun) {
+      const wouldApply = applyRuntimeConfigOverrides({ ...tune }, { mutate: false });
+      return { ok: true, dryRun: true, at: now, wouldApply };
+    }
+
+    const applied = applyRuntimeConfigOverrides({ ...tune }, { mutate: true });
+    if (Object.keys(applied).length === 0) {
+      reply.status(400);
+      return { error: 'AI tuning suggestion had no applicable changes (invalid or out of bounds).' };
+    }
+
+    persistMeta(persisted, {
+      runtimeConfig: {
+        updatedAt: now,
+        source: 'ai',
+        reason: `ai-policy:${decision.action}`,
+        values: applied,
+      },
+    });
+
+    return { ok: true, at: now, applied };
   });
 
   fastify.post('/portfolio/panic-liquidate', async (request, reply) => {
@@ -343,14 +386,7 @@ export async function controlRoutes(fastify: FastifyInstance) {
       return { error: parseResult.error.flatten() };
     }
 
-    const home = config.homeAsset?.toUpperCase();
-    if (!home) {
-      reply.status(500);
-      return { error: 'HOME_ASSET is not configured' };
-    }
-
     const now = Date.now();
-    const dryRun = parseResult.data.dryRun || !config.tradingEnabled;
 
     if (parseResult.data.stopAutoTrade) {
       persistMeta(persisted, {
@@ -360,152 +396,16 @@ export async function controlRoutes(fastify: FastifyInstance) {
       });
     }
 
-    let balances: Balance[];
-    try {
-      balances = await getBalances();
-    } catch (error) {
+    const res = await sweepUnusedToHome({
+      dryRun: parseResult.data.dryRun,
+      keepAllowedQuotes: parseResult.data.keepAllowedQuotes,
+      keepPositionAssets: parseResult.data.keepPositionAssets,
+      keepAssets: parseResult.data.keepAssets,
+    });
+    if (!res.ok) {
       reply.status(500);
-      return { error: `Failed to fetch balances: ${errorToString(error)}` };
+      return { error: res.error };
     }
-
-    if (!balances.length) {
-      reply.status(400);
-      return { error: 'No balances returned. Check Binance API key permissions.' };
-    }
-
-    const protectedAssets = new Set<string>([home]);
-    if (parseResult.data.keepAllowedQuotes) {
-      for (const asset of config.allowedQuoteAssets) protectedAssets.add(asset.toUpperCase());
-      protectedAssets.add(config.quoteAsset.toUpperCase());
-    }
-    for (const asset of parseResult.data.keepAssets) protectedAssets.add(asset.toUpperCase());
-
-    if (parseResult.data.keepPositionAssets) {
-      for (const pos of Object.values(persisted.positions)) {
-        if (!pos) continue;
-        if ((pos.venue ?? 'spot') !== 'spot') continue;
-        // Spot positions are long-only in this bot, but tolerate stale state and just protect base/quote/home.
-        if (pos.baseAsset) protectedAssets.add(pos.baseAsset.toUpperCase());
-        if (pos.quoteAsset) protectedAssets.add(pos.quoteAsset.toUpperCase());
-        if (pos.homeAsset) protectedAssets.add(pos.homeAsset.toUpperCase());
-      }
-    }
-
-    const symbols = await fetchTradableSymbols();
-
-    const actions: LiquidationAction[] = [];
-    const targets = balances
-      .filter((b) => !protectedAssets.has(b.asset.toUpperCase()))
-      .filter((b) => (b.free ?? 0) > 0 || (b.locked ?? 0) > 0)
-      .sort((a, b) => a.asset.localeCompare(b.asset));
-
-    for (const bal of targets) {
-      const asset = bal.asset.toUpperCase();
-      const free = bal.free ?? 0;
-      const locked = bal.locked ?? 0;
-
-      if (free <= 0) {
-        actions.push({ asset, status: 'skipped', reason: `No free balance (locked=${locked})` });
-        continue;
-      }
-
-      const pair = symbols.find(
-        (s) =>
-          s.status === 'TRADING' &&
-          (s.permissions?.includes('SPOT') || s.isSpotTradingAllowed) &&
-          s.baseAsset.toUpperCase() === asset &&
-          s.quoteAsset.toUpperCase() === home,
-      );
-      if (!pair) {
-        actions.push({ asset, status: 'skipped', reason: `No direct ${asset}${home} market` });
-        continue;
-      }
-
-      const requestedQty = free;
-      const adjustedQty = floorToStep(requestedQty, pair.stepSize);
-      if (!Number.isFinite(adjustedQty) || adjustedQty <= 0) {
-        actions.push({ asset, status: 'skipped', reason: `Dust: qty ${requestedQty} rounds to 0 (stepSize=${pair.stepSize ?? 'n/a'})` });
-        continue;
-      }
-      if (pair.minQty && adjustedQty < pair.minQty) {
-        actions.push({ asset, status: 'skipped', reason: `Dust: qty ${adjustedQty} below minQty ${pair.minQty}` });
-        continue;
-      }
-      if (pair.minNotional) {
-        try {
-          const snap = await get24hStats(pair.symbol);
-          const notional = adjustedQty * snap.price;
-          if (notional < pair.minNotional) {
-            actions.push({ asset, status: 'skipped', reason: `Dust: notional ${notional.toFixed(8)} below minNotional ${pair.minNotional}` });
-            continue;
-          }
-        } catch {
-          // If pricing fails, let placeOrder validate; worst-case it becomes an 'error' action.
-        }
-      }
-      if (dryRun) {
-        actions.push({ asset, symbol: pair.symbol, side: 'SELL', requestedQty: adjustedQty, status: 'simulated' });
-        continue;
-      }
-
-      try {
-        const order = await placeOrder({ symbol: pair.symbol, side: 'SELL', quantity: adjustedQty, type: 'MARKET' });
-        const executedQty = extractExecutedQty(order) ?? undefined;
-        actions.push({
-          asset,
-          symbol: pair.symbol,
-          side: 'SELL',
-          requestedQty: adjustedQty,
-          executedQty,
-          orderId: (order as { orderId?: string | number } | undefined)?.orderId,
-          status: 'placed',
-        });
-      } catch (error) {
-        logger.warn({ err: errorToLogObject(error), asset, symbol: pair.symbol }, 'Sweep unused failed');
-        actions.push({
-          asset,
-          symbol: pair.symbol,
-          status: 'error',
-          reason: errorToString(error),
-        });
-      }
-    }
-
-    let refreshed: Balance[] | undefined = undefined;
-    if (!dryRun) {
-      try {
-        refreshed = await getBalances();
-      } catch (error) {
-        logger.warn({ err: errorToLogObject(error) }, 'Failed to refresh balances after sweep');
-      }
-    }
-
-    // If we placed any orders, invalidate cached tickers for HOME conversions by touching a market call.
-    if (actions.some((a) => a.status === 'placed')) {
-      try {
-        const ref = `${home}USDC`;
-        void (await get24hStats(ref));
-      } catch {
-        // ignore
-      }
-    }
-
-    const stillHeld = (refreshed ?? balances).filter(
-      (b) => !protectedAssets.has(b.asset.toUpperCase()) && b.asset.toUpperCase() !== home && (b.free > 0 || b.locked > 0),
-    );
-    const skipped = actions.filter((a) => a.status === 'skipped').length;
-    const errored = actions.filter((a) => a.status === 'error').length;
-    const placed = actions.filter((a) => a.status === 'placed').length;
-
-    return {
-      ok: true,
-      dryRun,
-      homeAsset: home,
-      emergencyStop: persisted.meta?.emergencyStop ?? false,
-      protectedAssets: [...protectedAssets].sort(),
-      summary: { placed, skipped, errored, stillHeld: stillHeld.length },
-      actions,
-      balances: refreshed ?? balances,
-    };
+    return { ...res, emergencyStop: persisted.meta?.emergencyStop ?? false };
   });
 }

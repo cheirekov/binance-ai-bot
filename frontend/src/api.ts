@@ -68,3 +68,8 @@ export const stopGrid = async (symbol: string) => {
   const { data } = await api.post('/grid/stop', { symbol });
   return data as { ok: boolean; error?: string };
 };
+
+export const applyAiTuning = async (params?: { dryRun?: boolean }) => {
+  const { data } = await api.post('/ai-policy/apply-tuning', params ?? {});
+  return data as { ok: boolean; at?: number; applied?: Record<string, unknown>; wouldApply?: Record<string, unknown>; error?: string };
+};

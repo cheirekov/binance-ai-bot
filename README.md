@@ -9,6 +9,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Universe scanner that auto-picks a wallet-aware “best” symbol and reports the last auto-trade decision.
 - Optional portfolio mode: multiple concurrent long positions, conversion to required quote assets, and “risk-off” return to `HOME_ASSET`.
 - Optional spot grid mode: auto-discovers range-bound candidates (heuristics) and maintains a limit-order grid (spot-only).
+- Optional AI policy (gated): LLM can propose OPEN/CLOSE/HOLD/PANIC and bounded parameter tuning; engine still validates and enforces caps.
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
 
 ## Quick start (local)
@@ -20,6 +21,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
    - Portfolio mode (optional): set `PORTFOLIO_ENABLED=true`, choose `HOME_ASSET` (e.g. `USDC`), and optionally `CONVERSION_ENABLED=true` if you allow auto-converting into BTC/XRP quotes.
    - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only** and only run on symbols quoted in `HOME_ASSET` (e.g. `BTCUSDC` if `HOME_ASSET=USDC`). Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC`.
    - AI policy (optional): set `AI_POLICY_MODE=advisory` (no trading) or `AI_POLICY_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
+     - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.
    - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `OPENAI_BASE_URL` (for example: local `ollama`, `llama.cpp` server, or `vLLM`).
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.
@@ -57,6 +59,7 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `POST /grid/stop` — `{ symbol }` (spot only; stops a grid and cancels tracked orders)
 - `POST /portfolio/panic-liquidate` — `{ dryRun?: boolean, stopAutoTrade?: boolean }` (sell free balances to `HOME_ASSET` where markets exist)
 - `POST /portfolio/sweep-unused` — `{ dryRun?, stopAutoTrade?, keepAllowedQuotes?, keepPositionAssets?, keepAssets? }` (sell unused free balances to `HOME_ASSET`)
+- `POST /ai-policy/apply-tuning` — `{ dryRun?: boolean }` (apply last AI policy tuning suggestion; persists to `state.json`)
 
 ## Notes and safety
 - The bot estimates Binance spot fees (0.1% maker/taker) and limits size via `MAX_POSITION_SIZE_USDT` + `RISK_PER_TRADE_BP`.

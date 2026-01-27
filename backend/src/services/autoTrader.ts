@@ -10,7 +10,7 @@ import {
   placeOrder,
 } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
-import { config } from '../config.js';
+import { applyRuntimeConfigOverrides, config } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
@@ -19,6 +19,7 @@ import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
+import { sweepUnusedToHome } from './sweepUnused.js';
 
 const persisted = getPersistedState();
 
@@ -98,6 +99,17 @@ const bumpConversionCounter = () => {
       ? { date: nextDate, count: current.count + 1, lastAt: now }
       : { date: nextDate, count: 1, lastAt: now };
   persistMeta(persisted, { conversions: next });
+};
+
+const bumpAiSweepCounter = () => {
+  const now = Date.now();
+  const nextDate = todayKey();
+  const current = persisted.meta?.aiSweeps;
+  const next =
+    current && current.date === nextDate
+      ? { date: nextDate, count: current.count + 1, lastAt: now }
+      : { date: nextDate, count: 1, lastAt: now };
+  persistMeta(persisted, { aiSweeps: next });
 };
 
 const balanceMap = (balances: Balance[]) =>
@@ -1608,6 +1620,44 @@ export const autoTradeTick = async (symbol?: string) => {
 
   try {
     if (config.aiPolicyMode === 'gated-live' && aiDecision) {
+      if (config.aiPolicyTuningAutoApply && aiDecision.tune && Object.keys(aiDecision.tune).length > 0) {
+        const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
+        if (alreadyAppliedAt < aiDecision.at) {
+          const applied = applyRuntimeConfigOverrides({ ...aiDecision.tune }, { mutate: true });
+          if (Object.keys(applied).length > 0) {
+            persistMeta(persisted, {
+              runtimeConfig: {
+                updatedAt: Date.now(),
+                source: 'ai',
+                reason: `ai-policy:${aiDecision.action}`,
+                values: applied,
+              },
+            });
+            logger.info({ applied }, 'AI policy applied runtime tuning');
+          }
+        }
+      }
+
+      if (config.aiPolicySweepAutoApply && aiDecision.sweepUnusedToHome && config.tradeVenue === 'spot') {
+        const now = Date.now();
+        const cooldownMs = Math.max(0, config.aiPolicySweepCooldownMinutes) * 60_000;
+        const lastSweepAt = persisted.meta?.aiSweeps?.lastAt ?? 0;
+        if (!lastSweepAt || now - lastSweepAt >= cooldownMs) {
+          const res = await sweepUnusedToHome({
+            dryRun: false,
+            keepAllowedQuotes: true,
+            keepPositionAssets: true,
+            keepAssets: [],
+          });
+          if (res.ok) {
+            bumpAiSweepCounter();
+            logger.info({ summary: res.summary, stillHeld: res.summary.stillHeld }, 'AI policy sweep-unused executed');
+          } else {
+            logger.warn({ error: res.error }, 'AI policy sweep-unused failed');
+          }
+        }
+      }
+
       if (aiDecision.action === 'PANIC') {
         persistMeta(persisted, { emergencyStop: true, emergencyStopAt: Date.now(), emergencyStopReason: 'ai-policy' });
         recordDecision({

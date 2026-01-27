@@ -1,11 +1,11 @@
 import OpenAI from 'openai';
 import { z } from 'zod';
 
-import { get24hStats } from '../binance/client.js';
+import { get24hStats, getBalances } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { AiPolicyDecision, Horizon } from '../types.js';
+import { AiPolicyDecision, AiPolicyTuning, Balance, Horizon } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta } from './persistence.js';
@@ -17,6 +17,18 @@ const client = config.openAiApiKey
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
+const tuneSchema = z
+  .object({
+    minQuoteVolume: z.number().min(100_000).max(200_000_000).optional(),
+    maxVolatilityPercent: z.number().min(2).max(60).optional(),
+    autoTradeHorizon: z.enum(['short', 'medium', 'long']).optional(),
+    portfolioMaxAllocPct: z.number().min(1).max(95).optional(),
+    portfolioMaxPositions: z.number().int().min(1).max(15).optional(),
+    gridMaxAllocPct: z.number().min(0).max(80).optional(),
+  })
+  .strict()
+  .optional();
+
 const decisionSchema = z.object({
   action: z.enum(['HOLD', 'OPEN', 'CLOSE', 'PANIC']),
   symbol: z.string().min(3).max(20).optional(),
@@ -24,6 +36,8 @@ const decisionSchema = z.object({
   positionKey: z.string().min(3).max(64).optional(),
   confidence: z.number().min(0).max(1),
   reason: z.string().min(1).max(400),
+  tune: tuneSchema,
+  sweepUnusedToHome: z.boolean().optional(),
 });
 
 const getPolicyMeta = () => {
@@ -111,11 +125,43 @@ Return ONLY a JSON object with keys:
 - positionKey?: string (required when action=CLOSE; must match exactly one provided open position key)
 - confidence: number 0..1
 - reason: short string (<= 400 chars)
+- tune?: optional object with any of:
+    - minQuoteVolume (number)
+    - maxVolatilityPercent (number)
+    - autoTradeHorizon (short|medium|long)
+    - portfolioMaxAllocPct (number)
+    - portfolioMaxPositions (integer)
+    - gridMaxAllocPct (number)
+- sweepUnusedToHome?: boolean (only if unusedAssets are non-empty)
 
 Hard rules:
 - NEVER invent symbols or positionKey. Choose ONLY from the provided lists.
+- NEVER invent config keys. If proposing tune, use ONLY the allowed keys and keep values within provided bounds.
 - If you are uncertain, choose HOLD.
 - Prefer risk control over activity.`;
+
+const summarizeBalances = (balances: Balance[], max = 12) => {
+  const rows = balances
+    .map((b) => ({ asset: b.asset.toUpperCase(), free: b.free ?? 0, locked: b.locked ?? 0 }))
+    .filter((b) => Number.isFinite(b.free) && Number.isFinite(b.locked) && b.free + b.locked > 0)
+    .sort((a, b) => b.locked - a.locked || b.free - a.free)
+    .slice(0, Math.max(1, max));
+  return rows;
+};
+
+const computeProtectedAssets = (homeAsset: string) => {
+  const protectedAssets = new Set<string>([homeAsset.toUpperCase()]);
+  for (const asset of config.allowedQuoteAssets) protectedAssets.add(asset.toUpperCase());
+  protectedAssets.add(config.quoteAsset.toUpperCase());
+  for (const pos of Object.values(persisted.positions)) {
+    if (!pos) continue;
+    if ((pos.venue ?? 'spot') !== 'spot') continue;
+    if (pos.baseAsset) protectedAssets.add(pos.baseAsset.toUpperCase());
+    if (pos.quoteAsset) protectedAssets.add(pos.quoteAsset.toUpperCase());
+    if (pos.homeAsset) protectedAssets.add(pos.homeAsset.toUpperCase());
+  }
+  return protectedAssets;
+};
 
 const userPrompt = (payload: {
   venue: string;
@@ -125,6 +171,12 @@ const userPrompt = (payload: {
   openPositions: ReturnType<typeof buildOpenPositions>;
   candidates: Awaited<ReturnType<typeof buildCandidates>>;
   newsSentiment: number;
+  tunables: {
+    current: AiPolicyTuning;
+    bounds: Record<string, { min: number; max: number }>;
+  };
+  balanceSummary?: ReturnType<typeof summarizeBalances>;
+  unusedAssets?: string[];
 }) => `Context (JSON):
 ${JSON.stringify(payload, null, 2)}
 
@@ -157,6 +209,24 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
     const [news, candidates] = await Promise.all([getNewsSentiment(), buildCandidates(seedSymbol)]);
     const openPositions = buildOpenPositions();
 
+    let balanceSummary: ReturnType<typeof summarizeBalances> | undefined = undefined;
+    let unusedAssets: string[] | undefined = undefined;
+    if (config.tradeVenue === 'spot') {
+      try {
+        const balances = await getBalances();
+        balanceSummary = summarizeBalances(balances);
+        const protectedAssets = computeProtectedAssets(config.homeAsset.toUpperCase());
+        const unused = balances
+          .filter((b) => (b.free ?? 0) > 0)
+          .map((b) => b.asset.toUpperCase())
+          .filter((a) => !protectedAssets.has(a))
+          .sort();
+        unusedAssets = unused.slice(0, 20);
+      } catch {
+        // ignore
+      }
+    }
+
     const payload = {
       venue: config.tradeVenue,
       homeAsset: config.homeAsset,
@@ -165,6 +235,25 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
       openPositions,
       candidates,
       newsSentiment: news.sentiment,
+      tunables: {
+        current: {
+          minQuoteVolume: config.minQuoteVolume,
+          maxVolatilityPercent: config.maxVolatilityPercent,
+          autoTradeHorizon: config.autoTradeHorizon,
+          portfolioMaxAllocPct: config.portfolioMaxAllocPct,
+          portfolioMaxPositions: config.portfolioMaxPositions,
+          gridMaxAllocPct: config.gridMaxAllocPct,
+        },
+        bounds: {
+          minQuoteVolume: { min: 100_000, max: 200_000_000 },
+          maxVolatilityPercent: { min: 2, max: 60 },
+          portfolioMaxAllocPct: { min: 1, max: 95 },
+          portfolioMaxPositions: { min: 1, max: 15 },
+          gridMaxAllocPct: { min: 0, max: 80 },
+        },
+      },
+      balanceSummary,
+      unusedAssets,
     };
 
     const completion = await client.chat.completions.create({
@@ -190,6 +279,8 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
       confidence: parsed.confidence,
       reason: parsed.reason,
       model: config.aiPolicyModel,
+      tune: parsed.tune as AiPolicyTuning | undefined,
+      sweepUnusedToHome: parsed.sweepUnusedToHome,
     };
 
     persistMeta(persisted, { aiPolicy: { ...nextMeta, lastDecision: decision } });

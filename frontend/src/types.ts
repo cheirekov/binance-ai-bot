@@ -23,6 +23,15 @@ export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
 export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
 
+export interface AiPolicyTuning {
+  minQuoteVolume?: number;
+  maxVolatilityPercent?: number;
+  autoTradeHorizon?: Horizon;
+  portfolioMaxAllocPct?: number;
+  portfolioMaxPositions?: number;
+  gridMaxAllocPct?: number;
+}
+
 export interface AiPolicyDecision {
   at: number;
   mode: AiPolicyMode;
@@ -33,6 +42,8 @@ export interface AiPolicyDecision {
   confidence: number;
   reason: string;
   model?: string;
+  tune?: AiPolicyTuning;
+  sweepUnusedToHome?: boolean;
 }
 
 export interface AiPolicyMeta {
@@ -110,6 +121,9 @@ export interface StrategyResponse {
     feeRate: { maker: number; taker: number };
   };
   availableSymbols: string[];
+  minQuoteVolume?: number;
+  maxVolatilityPercent?: number;
+  autoTradeHorizon?: Horizon;
   tradeVenue?: 'spot' | 'futures';
   futuresEnabled?: boolean;
   futuresLeverage?: number;
@@ -140,6 +154,12 @@ export interface StrategyResponse {
   };
   aiPolicyMode?: AiPolicyMode;
   aiPolicy?: AiPolicyMeta;
+  runtimeConfig?: {
+    updatedAt: number;
+    source?: 'manual' | 'ai';
+    reason?: string;
+    values: AiPolicyTuning;
+  };
   positions?: Record<
     string,
     {

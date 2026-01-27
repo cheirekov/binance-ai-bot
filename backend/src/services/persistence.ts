@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { config } from '../config.js';
+import { applyRuntimeConfigOverrides, config } from '../config.js';
 import { logger } from '../logger.js';
 import { PersistedPayload, StrategyResponsePayload } from '../types.js';
 import { errorToLogObject } from '../utils/errors.js';
@@ -35,6 +35,14 @@ export const loadState = (): PersistedPayload => {
     }
     if (droppedGridKeys.length > 0) {
       logger.warn({ droppedGridKeys }, 'Dropped invalid grid keys from persisted state');
+    }
+
+    const runtime = parsed.meta?.runtimeConfig?.values ?? {};
+    if (runtime && typeof runtime === 'object') {
+      const applied = applyRuntimeConfigOverrides(runtime);
+      if (Object.keys(applied).length > 0) {
+        logger.info({ applied }, 'Applied runtime config overrides from state');
+      }
     }
     return {
       strategies: parsed.strategies ?? {},

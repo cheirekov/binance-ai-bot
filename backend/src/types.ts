@@ -6,6 +6,15 @@ export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
 export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
 
+export interface AiPolicyTuning {
+  minQuoteVolume?: number;
+  maxVolatilityPercent?: number;
+  autoTradeHorizon?: Horizon;
+  portfolioMaxAllocPct?: number;
+  portfolioMaxPositions?: number;
+  gridMaxAllocPct?: number;
+}
+
 export interface AiPolicyDecision {
   at: number;
   mode: AiPolicyMode;
@@ -16,6 +25,8 @@ export interface AiPolicyDecision {
   confidence: number;
   reason: string;
   model?: string;
+  tune?: AiPolicyTuning;
+  sweepUnusedToHome?: boolean;
 }
 
 export interface MarketSnapshot {
@@ -126,6 +137,9 @@ export interface StrategyResponsePayload {
   strategies: StrategyBundle | null;
   risk: RiskSettings;
   quoteAsset: string;
+  minQuoteVolume?: number;
+  maxVolatilityPercent?: number;
+  autoTradeHorizon?: Horizon;
   availableSymbols: string[];
   tradeVenue?: 'spot' | 'futures';
   futuresEnabled?: boolean;
@@ -160,6 +174,7 @@ export interface StrategyResponsePayload {
   equity?: NonNullable<PersistedPayload['meta']>['equity'];
   aiPolicyMode?: AiPolicyMode;
   aiPolicy?: NonNullable<PersistedPayload['meta']>['aiPolicy'];
+  runtimeConfig?: NonNullable<PersistedPayload['meta']>['runtimeConfig'];
   emergencyStop?: boolean;
   emergencyStopAt?: number;
   emergencyStopReason?: string;
@@ -207,6 +222,12 @@ export interface PersistedPayload {
       lastAt?: number;
       lastDecision?: AiPolicyDecision;
     };
+    runtimeConfig?: {
+      updatedAt: number;
+      source?: 'manual' | 'ai';
+      reason?: string;
+      values: AiPolicyTuning;
+    };
     ocoReconcileAt?: number;
     emergencyStop?: boolean;
     emergencyStopAt?: number;
@@ -223,6 +244,11 @@ export interface PersistedPayload {
     };
     accountBlacklist?: Record<string, { at: number; reason: string }>;
     conversions?: {
+      date: string;
+      count: number;
+      lastAt?: number;
+    };
+    aiSweeps?: {
       date: string;
       count: number;
       lastAt?: number;

@@ -72,6 +72,25 @@ const oneOf = <T extends string>(value: string | undefined, allowed: readonly T[
   return (allowed.find((v) => v.toUpperCase() === upper) as T | undefined) ?? fallback;
 };
 
+export type RuntimeConfigOverrides = Partial<{
+  minQuoteVolume: number;
+  maxVolatilityPercent: number;
+  autoTradeHorizon: 'short' | 'medium' | 'long';
+  portfolioMaxAllocPct: number;
+  portfolioMaxPositions: number;
+  gridMaxAllocPct: number;
+}>;
+
+const clampNumber = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const runtimeBounds = {
+  minQuoteVolume: { min: 100_000, max: 200_000_000 },
+  maxVolatilityPercent: { min: 2, max: 60 },
+  portfolioMaxAllocPct: { min: 1, max: 95 },
+  portfolioMaxPositions: { min: 1, max: 15 },
+  gridMaxAllocPct: { min: 0, max: 80 },
+} as const;
+
 export const config = {
   env: stringFromEnv(process.env.NODE_ENV, 'development'),
   port: numberFromEnv(process.env.PORT, 8788),
@@ -155,6 +174,9 @@ export const config = {
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),
+  aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
+  aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),
+  aiPolicySweepCooldownMinutes: numberFromEnv(process.env.AI_POLICY_SWEEP_COOLDOWN_MINUTES, 180),
   apiKey: optionalStringFromEnv(process.env.API_KEY),
   clientKey: optionalStringFromEnv(process.env.CLIENT_KEY),
 };
@@ -162,4 +184,65 @@ export const config = {
 export const feeRate = {
   maker: 0.001,
   taker: 0.001,
+};
+
+export const applyRuntimeConfigOverrides = (overrides: RuntimeConfigOverrides, options?: { mutate?: boolean }) => {
+  const mutate = options?.mutate ?? true;
+  const applied: RuntimeConfigOverrides = {};
+
+  if (overrides.minQuoteVolume !== undefined && Number.isFinite(overrides.minQuoteVolume)) {
+    const bounded = clampNumber(
+      Math.floor(overrides.minQuoteVolume),
+      runtimeBounds.minQuoteVolume.min,
+      runtimeBounds.minQuoteVolume.max,
+    );
+    if (mutate) config.minQuoteVolume = bounded;
+    applied.minQuoteVolume = bounded;
+  }
+
+  if (overrides.maxVolatilityPercent !== undefined && Number.isFinite(overrides.maxVolatilityPercent)) {
+    const bounded = clampNumber(
+      overrides.maxVolatilityPercent,
+      runtimeBounds.maxVolatilityPercent.min,
+      runtimeBounds.maxVolatilityPercent.max,
+    );
+    if (mutate) config.maxVolatilityPercent = bounded;
+    applied.maxVolatilityPercent = bounded;
+  }
+
+  if (overrides.autoTradeHorizon !== undefined) {
+    const v = overrides.autoTradeHorizon.toLowerCase() as RuntimeConfigOverrides['autoTradeHorizon'];
+    if (v === 'short' || v === 'medium' || v === 'long') {
+      if (mutate) config.autoTradeHorizon = v;
+      applied.autoTradeHorizon = v;
+    }
+  }
+
+  if (overrides.portfolioMaxAllocPct !== undefined && Number.isFinite(overrides.portfolioMaxAllocPct)) {
+    const bounded = clampNumber(
+      overrides.portfolioMaxAllocPct,
+      runtimeBounds.portfolioMaxAllocPct.min,
+      runtimeBounds.portfolioMaxAllocPct.max,
+    );
+    if (mutate) config.portfolioMaxAllocPct = bounded;
+    applied.portfolioMaxAllocPct = bounded;
+  }
+
+  if (overrides.portfolioMaxPositions !== undefined && Number.isFinite(overrides.portfolioMaxPositions)) {
+    const bounded = clampNumber(
+      Math.floor(overrides.portfolioMaxPositions),
+      runtimeBounds.portfolioMaxPositions.min,
+      runtimeBounds.portfolioMaxPositions.max,
+    );
+    if (mutate) config.portfolioMaxPositions = bounded;
+    applied.portfolioMaxPositions = bounded;
+  }
+
+  if (overrides.gridMaxAllocPct !== undefined && Number.isFinite(overrides.gridMaxAllocPct)) {
+    const bounded = clampNumber(overrides.gridMaxAllocPct, runtimeBounds.gridMaxAllocPct.min, runtimeBounds.gridMaxAllocPct.max);
+    if (mutate) config.gridMaxAllocPct = bounded;
+    applied.gridMaxAllocPct = bounded;
+  }
+
+  return applied;
 };
