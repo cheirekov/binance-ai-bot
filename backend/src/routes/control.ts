@@ -59,6 +59,21 @@ const extractExecutedQty = (order: unknown): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+const decimalsForStep = (step?: number): number => {
+  if (!step) return 8;
+  const s = String(step);
+  if (s.includes('e-')) return Number(s.split('e-')[1] ?? 8);
+  const [, frac] = s.split('.');
+  return frac ? frac.length : 0;
+};
+
+const floorToStep = (value: number, step?: number) => {
+  if (!step) return value;
+  const decimals = decimalsForStep(step);
+  const floored = Math.floor(value / step) * step;
+  return Number(floored.toFixed(decimals));
+};
+
 export async function controlRoutes(fastify: FastifyInstance) {
   fastify.post('/bot/emergency-stop', async (request) => {
     const parseResult = emergencyStopSchema.safeParse(request.body);
@@ -196,13 +211,42 @@ export async function controlRoutes(fastify: FastifyInstance) {
       }
 
       const requestedQty = free;
+      const adjustedQty = floorToStep(requestedQty, pair.stepSize);
+      const minQty = pair.minQty ?? 0;
+      if (!Number.isFinite(adjustedQty) || adjustedQty <= 0 || (minQty > 0 && adjustedQty < minQty)) {
+        actions.push({
+          asset,
+          status: 'skipped',
+          reason: `Dust: qty ${requestedQty} -> ${adjustedQty} below minQty ${minQty || 'unknown'}`,
+        });
+        continue;
+      }
+
+      const minNotional = pair.minNotional ?? 0;
+      if (minNotional > 0) {
+        try {
+          const snap = await get24hStats(pair.symbol);
+          const notional = adjustedQty * snap.price;
+          if (notional < minNotional) {
+            actions.push({
+              asset,
+              status: 'skipped',
+              reason: `Dust: notional ${notional.toFixed(8)} below minNotional ${minNotional}`,
+            });
+            continue;
+          }
+        } catch {
+          // If pricing fails, let placeOrder validate; worst-case it becomes an 'error' action.
+        }
+      }
+
       if (dryRun) {
         actions.push({ asset, symbol: pair.symbol, side: 'SELL', requestedQty, status: 'simulated' });
         continue;
       }
 
       try {
-        const order = await placeOrder({ symbol: pair.symbol, side: 'SELL', quantity: requestedQty, type: 'MARKET' });
+        const order = await placeOrder({ symbol: pair.symbol, side: 'SELL', quantity: adjustedQty, type: 'MARKET' });
         const executedQty = extractExecutedQty(order) ?? undefined;
         actions.push({
           asset,

@@ -415,7 +415,7 @@ const convertToHome = async (
       await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: qtyFrom * buffer, type: 'MARKET' });
     } else {
       const snap = await get24hStats(conversion.symbol);
-      const qtyHome = snap.price > 0 ? qtyFrom * snap.price * buffer : 0;
+      const qtyHome = snap.price > 0 ? (qtyFrom / snap.price) * buffer : 0;
       if (qtyHome <= 0) return { balances, note: 'Conversion sizing failed' };
       await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qtyHome, type: 'MARKET' });
     }
@@ -694,167 +694,190 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
   const last = persisted.meta?.ocoReconcileAt ?? 0;
   if (now - last < 10 * 60 * 1000) return;
 
-  let balances: Balance[] = [];
-  const loadBalances = async () => {
-    if (balances.length) return balances;
+  let balances: Balance[];
+  try {
     balances = await getBalances();
-    return balances;
-  };
+  } catch (error) {
+    logger.warn({ err: errorToLogObject(error) }, 'OCO reconcile: failed to fetch balances');
+    persistMeta(persisted, { ocoReconcileAt: now });
+    return;
+  }
 
-  const linkOrImportOpenOcos = async () => {
-    let openOcos: unknown[] = [];
-    try {
-      openOcos = await getOpenOcoOrders();
-    } catch (error) {
-      logger.warn({ err: errorToLogObject(error) }, 'OCO reconcile: failed to fetch open OCO orders');
-      return;
+  const totals = balanceTotalsMap(balances);
+
+  let openOcos: unknown[] = [];
+  let openOcosOk = true;
+  try {
+    openOcos = await getOpenOcoOrders();
+  } catch (error) {
+    openOcosOk = false;
+    logger.warn({ err: errorToLogObject(error) }, 'OCO reconcile: failed to fetch open OCO orders');
+    openOcos = [];
+  }
+
+  const byOrderListId = new Map<number, string>();
+  const bySymbol = new Map<string, string>();
+  for (const [key, pos] of Object.entries(persisted.positions)) {
+    if (!pos) continue;
+    if (positionVenue(pos) !== 'spot') continue;
+    if (pos.symbol) bySymbol.set(pos.symbol.toUpperCase(), key);
+    if (pos.ocoOrderListId) byOrderListId.set(pos.ocoOrderListId, key);
+  }
+
+  const allowedSymbolSet = new Set(config.allowedSymbols.map((s) => s.toUpperCase()));
+  const allowedQuoteSet = new Set(config.allowedQuoteAssets.map((s) => s.toUpperCase()));
+  const openOrderListIds = new Set<number>();
+
+  for (const oco of openOcos) {
+    if (!oco || typeof oco !== 'object') continue;
+    const rec = oco as Record<string, unknown>;
+    const orderListId = numberFromUnknown(rec.orderListId);
+    const symbolRaw = rec.symbol;
+    const symbol = typeof symbolRaw === 'string' ? symbolRaw.toUpperCase() : '';
+    if (!orderListId || !symbol) continue;
+    openOrderListIds.add(orderListId);
+
+    if (byOrderListId.has(orderListId)) continue;
+
+    const existingKey = bySymbol.get(symbol);
+    if (existingKey) {
+      const existing = persisted.positions[existingKey];
+      if (existing && positionVenue(existing) === 'spot' && !existing.ocoOrderListId) {
+        persistPosition(persisted, existingKey, { ...existing, ocoOrderListId: orderListId });
+        logger.info({ symbol, orderListId }, 'OCO reconcile: linked open OCO to tracked position');
+      }
+      continue;
     }
-    if (!openOcos.length) return;
 
-    try {
-      await loadBalances();
-    } catch (error) {
-      logger.warn({ err: errorToLogObject(error) }, 'OCO reconcile: failed to fetch balances for open OCO sync');
-      return;
+    const info = findSymbolInfo(symbols, symbol);
+    const quoteAsset = (info?.quoteAsset ?? '').toUpperCase();
+    const baseAsset = (info?.baseAsset ?? '').toUpperCase();
+    if (!quoteAsset || !baseAsset) continue;
+
+    const isAllowed = config.allowedSymbols.length > 0 ? allowedSymbolSet.has(symbol) : allowedQuoteSet.has(quoteAsset);
+    if (!isAllowed) continue;
+
+    // Try to infer horizon from lastTrades; fallback to short.
+    let horizon: Position['horizon'] = 'short';
+    let bestTs = 0;
+    for (const [key, ts] of Object.entries(persisted.lastTrades)) {
+      const [sym, h] = key.split(':');
+      if (sym?.toUpperCase() !== symbol) continue;
+      if (!Number.isFinite(ts) || ts <= bestTs) continue;
+      if (h === 'short' || h === 'medium' || h === 'long') {
+        bestTs = ts;
+        horizon = h;
+      }
     }
 
-    const totals = balanceTotalsMap(balances);
-    const byOrderListId = new Map<number, string>();
-    const bySymbol = new Map<string, string>();
+    // Pull details (qty + prices) for a better import; if it fails, import as a minimal tracked position.
+    let ocoQty = 0;
+    let takeProfit: number[] | undefined;
+    let stopLoss: number | undefined;
+    let openedAt = now;
+    try {
+      const details = await getOcoOrder(orderListId);
+      if (details && typeof details === 'object') {
+        const det = details as Record<string, unknown>;
+        const txTime = numberFromUnknown(det.transactionTime);
+        if (txTime) openedAt = txTime;
+        const reports = det.orderReports;
+        if (Array.isArray(reports)) {
+          let tp = 0;
+          let sl = 0;
+          let qty = 0;
+          for (const report of reports) {
+            if (!report || typeof report !== 'object') continue;
+            const r = report as Record<string, unknown>;
+            const side = String(r.side ?? '').toUpperCase();
+            if (side !== 'SELL') continue;
+            const type = String(r.type ?? '').toUpperCase();
+            const qtyNum = numberFromUnknown(r.origQty) ?? numberFromUnknown(r.quantity) ?? 0;
+            if (qtyNum > qty) qty = qtyNum;
+            const price = numberFromUnknown(r.price) ?? 0;
+            const stopPrice = numberFromUnknown(r.stopPrice) ?? 0;
+            if (!tp && price > 0 && type.includes('LIMIT')) tp = price;
+            if (!sl && stopPrice > 0 && type.includes('STOP')) sl = stopPrice;
+          }
+          ocoQty = qty;
+          if (tp > 0) takeProfit = [tp];
+          if (sl > 0) stopLoss = sl;
+        }
+      }
+    } catch (error) {
+      logger.warn({ err: errorToLogObject(error), symbol, orderListId }, 'OCO reconcile: failed to fetch OCO details');
+    }
+
+    const baseBal = totals.get(baseAsset) ?? { free: 0, locked: 0, total: 0 };
+    const totalBase = baseBal.total;
+    const qtySource = ocoQty > 0 ? ocoQty : totalBase;
+    const size = floorToStep(Math.min(qtySource, totalBase > 0 ? totalBase : qtySource), info?.stepSize);
+    if (!Number.isFinite(size) || size <= 0) continue;
+
+    let entryPrice = 0;
+    try {
+      entryPrice = (await get24hStats(symbol)).price;
+    } catch {
+      // Keep entry price as 0 if pricing is temporarily unavailable.
+    }
+
+    let notionalHome: number | undefined;
+    try {
+      const quoteToHome = await getAssetToHomeRate(symbols, quoteAsset, config.homeAsset);
+      if (quoteToHome && entryPrice > 0) {
+        notionalHome = size * entryPrice * quoteToHome;
+      }
+    } catch {
+      // ignore
+    }
+
+    const positionKey = getPositionKey(symbol, horizon);
+    persistPosition(persisted, positionKey, {
+      symbol,
+      horizon,
+      side: 'BUY',
+      entryPrice: entryPrice > 0 ? entryPrice : 0,
+      size,
+      stopLoss,
+      takeProfit,
+      baseAsset,
+      quoteAsset,
+      homeAsset: config.homeAsset.toUpperCase(),
+      notionalHome,
+      ocoOrderListId: orderListId,
+      venue: 'spot',
+      openedAt,
+    });
+    logger.warn({ symbol, orderListId, size }, 'OCO reconcile: imported open OCO as a tracked position');
+  }
+
+  // If an OCO order list is no longer open on the exchange but we still hold the base asset,
+  // clear the stale orderListId so the reconcile pass can re-arm exits.
+  if (openOcosOk) {
     for (const [key, pos] of Object.entries(persisted.positions)) {
       if (!pos) continue;
       if (positionVenue(pos) !== 'spot') continue;
-      if (pos.symbol) bySymbol.set(pos.symbol.toUpperCase(), key);
-      if (pos.ocoOrderListId) byOrderListId.set(pos.ocoOrderListId, key);
-    }
+      if (pos.side !== 'BUY') continue;
+      if (!pos.ocoOrderListId) continue;
+      if (openOrderListIds.has(pos.ocoOrderListId)) continue;
 
-    const allowedSymbolSet = new Set(config.allowedSymbols.map((s) => s.toUpperCase()));
-    const allowedQuoteSet = new Set(config.allowedQuoteAssets.map((s) => s.toUpperCase()));
-
-    for (const oco of openOcos) {
-      if (!oco || typeof oco !== 'object') continue;
-      const rec = oco as Record<string, unknown>;
-      const orderListId = numberFromUnknown(rec.orderListId);
-      const symbolRaw = rec.symbol;
-      const symbol = typeof symbolRaw === 'string' ? symbolRaw.toUpperCase() : '';
-      if (!orderListId || !symbol) continue;
-
-      if (byOrderListId.has(orderListId)) continue;
-
-      const existingKey = bySymbol.get(symbol);
-      if (existingKey) {
-        const existing = persisted.positions[existingKey];
-        if (existing && positionVenue(existing) === 'spot' && !existing.ocoOrderListId) {
-          persistPosition(persisted, existingKey, { ...existing, ocoOrderListId: orderListId });
-          logger.info({ symbol, orderListId }, 'OCO reconcile: linked open OCO to tracked position');
-        }
-        continue;
-      }
-
+      const symbol = pos.symbol.toUpperCase();
       const info = findSymbolInfo(symbols, symbol);
-      const quoteAsset = (info?.quoteAsset ?? '').toUpperCase();
-      const baseAsset = (info?.baseAsset ?? '').toUpperCase();
-      if (!quoteAsset || !baseAsset) continue;
-
-      const isAllowed = config.allowedSymbols.length > 0 ? allowedSymbolSet.has(symbol) : allowedQuoteSet.has(quoteAsset);
-      if (!isAllowed) continue;
-
-      // Try to infer horizon from lastTrades; fallback to short.
-      let horizon: Position['horizon'] = 'short';
-      let bestTs = 0;
-      for (const [key, ts] of Object.entries(persisted.lastTrades)) {
-        const [sym, h] = key.split(':');
-        if (sym?.toUpperCase() !== symbol) continue;
-        if (!Number.isFinite(ts) || ts <= bestTs) continue;
-        if (h === 'short' || h === 'medium' || h === 'long') {
-          bestTs = ts;
-          horizon = h;
-        }
-      }
-
-      // Pull details (qty + prices) for a better import; if it fails, import as a minimal tracked position.
-      let ocoQty = 0;
-      let takeProfit: number[] | undefined;
-      let stopLoss: number | undefined;
-      let openedAt = now;
-      try {
-        const details = await getOcoOrder(orderListId);
-        if (details && typeof details === 'object') {
-          const det = details as Record<string, unknown>;
-          const txTime = numberFromUnknown(det.transactionTime);
-          if (txTime) openedAt = txTime;
-          const reports = det.orderReports;
-          if (Array.isArray(reports)) {
-            let tp = 0;
-            let sl = 0;
-            let qty = 0;
-            for (const report of reports) {
-              if (!report || typeof report !== 'object') continue;
-              const r = report as Record<string, unknown>;
-              const side = String(r.side ?? '').toUpperCase();
-              if (side !== 'SELL') continue;
-              const type = String(r.type ?? '').toUpperCase();
-              const qtyNum = numberFromUnknown(r.origQty) ?? numberFromUnknown(r.quantity) ?? 0;
-              if (qtyNum > qty) qty = qtyNum;
-              const price = numberFromUnknown(r.price) ?? 0;
-              const stopPrice = numberFromUnknown(r.stopPrice) ?? 0;
-              if (!tp && price > 0 && type.includes('LIMIT')) tp = price;
-              if (!sl && stopPrice > 0 && type.includes('STOP')) sl = stopPrice;
-            }
-            ocoQty = qty;
-            if (tp > 0) takeProfit = [tp];
-            if (sl > 0) stopLoss = sl;
-          }
-        }
-      } catch (error) {
-        logger.warn({ err: errorToLogObject(error), symbol, orderListId }, 'OCO reconcile: failed to fetch OCO details');
-      }
+      const baseAsset = (pos.baseAsset ?? info?.baseAsset ?? '').toUpperCase();
+      if (!baseAsset) continue;
 
       const baseBal = totals.get(baseAsset) ?? { free: 0, locked: 0, total: 0 };
       const totalBase = baseBal.total;
-      const qtySource = ocoQty > 0 ? ocoQty : totalBase;
-      const size = floorToStep(Math.min(qtySource, totalBase > 0 ? totalBase : qtySource), info?.stepSize);
-      if (!Number.isFinite(size) || size <= 0) continue;
-
-      let entryPrice = 0;
-      try {
-        entryPrice = (await get24hStats(symbol)).price;
-      } catch {
-        // Keep entry price as 0 if pricing is temporarily unavailable.
+      if (!Number.isFinite(totalBase) || totalBase <= 0) {
+        persistPosition(persisted, key, null);
+        logger.warn({ symbol, orderListId: pos.ocoOrderListId }, 'OCO reconcile: cleared stale position (no balance)');
+        continue;
       }
 
-      let notionalHome: number | undefined;
-      try {
-        const quoteToHome = await getAssetToHomeRate(symbols, quoteAsset, config.homeAsset);
-        if (quoteToHome && entryPrice > 0) {
-          notionalHome = size * entryPrice * quoteToHome;
-        }
-      } catch {
-        // ignore
-      }
-
-      const positionKey = getPositionKey(symbol, horizon);
-      persistPosition(persisted, positionKey, {
-        symbol,
-        horizon,
-        side: 'BUY',
-        entryPrice: entryPrice > 0 ? entryPrice : 0,
-        size,
-        stopLoss,
-        takeProfit,
-        baseAsset,
-        quoteAsset,
-        homeAsset: config.homeAsset.toUpperCase(),
-        notionalHome,
-        ocoOrderListId: orderListId,
-        venue: 'spot',
-        openedAt,
-      });
-      logger.warn({ symbol, orderListId, size }, 'OCO reconcile: imported open OCO as a tracked position');
+      persistPosition(persisted, key, { ...pos, ocoOrderListId: undefined });
+      logger.warn({ symbol, orderListId: pos.ocoOrderListId }, 'OCO reconcile: OCO missing; will re-arm exits');
     }
-  };
-
-  await linkOrImportOpenOcos();
+  }
 
   const openWithoutOco = Object.entries(persisted.positions).filter(([, pos]) => {
     if (!pos) return false;
@@ -867,13 +890,6 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
   });
 
   if (openWithoutOco.length) {
-    try {
-      await loadBalances();
-    } catch (error) {
-      logger.warn({ err: errorToLogObject(error) }, 'OCO reconcile: failed to fetch balances');
-      persistMeta(persisted, { ocoReconcileAt: now });
-      return;
-    }
     const freeBy = balanceMap(balances);
 
     for (const [key, pos] of openWithoutOco) {
