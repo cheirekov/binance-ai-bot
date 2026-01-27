@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-import { autoSelectSymbol, executeTrade, fetchStrategy, panicLiquidate, setEmergencyStop, sweepUnused, triggerRefresh } from './api';
+import {
+  autoSelectSymbol,
+  executeTrade,
+  fetchStrategy,
+  panicLiquidate,
+  setEmergencyStop,
+  startGrid,
+  stopGrid,
+  sweepUnused,
+  triggerRefresh,
+} from './api';
 import { Balance, StrategyPlan, StrategyResponse } from './types';
 
 const formatPrice = (value: number | undefined, quoteAsset: string | undefined, digits = 8) => {
@@ -72,6 +82,7 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [panicRunning, setPanicRunning] = useState(false);
   const [sweepRunning, setSweepRunning] = useState(false);
+  const [gridRunning, setGridRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tradeMessage, setTradeMessage] = useState<string | null>(null);
   const riskFlags = data?.riskFlags ?? [];
@@ -260,6 +271,60 @@ function App() {
     }
   };
 
+  const onStartGrid = async () => {
+    const venue = data?.tradeVenue ?? 'spot';
+    if (venue !== 'spot') {
+      setTradeMessage('Grid is available only in spot mode.');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Start grid on ${selectedSymbol}: this will place multiple LIMIT buy/sell orders across an auto-derived range.\n\nGrid trading can lose money in trending markets.\n\nContinue?`,
+    );
+    if (!confirmed) return;
+    setGridRunning(true);
+    setTradeMessage(null);
+    try {
+      const res = await startGrid(selectedSymbol);
+      if (!res.ok) {
+        setError(res.error ?? 'Grid start failed. Check logs.');
+      } else {
+        setTradeMessage(`Grid started for ${selectedSymbol}.`);
+      }
+    } catch {
+      setError('Grid start failed. Check logs.');
+    } finally {
+      setGridRunning(false);
+      void load(selectedSymbol);
+    }
+  };
+
+  const onStopGrid = async () => {
+    const venue = data?.tradeVenue ?? 'spot';
+    if (venue !== 'spot') {
+      setTradeMessage('Grid is available only in spot mode.');
+      return;
+    }
+    const confirmed = window.confirm(
+      `Stop grid on ${selectedSymbol}: this will cancel bot-tracked grid orders for this symbol.\n\nIt will not liquidate holdings.\n\nContinue?`,
+    );
+    if (!confirmed) return;
+    setGridRunning(true);
+    setTradeMessage(null);
+    try {
+      const res = await stopGrid(selectedSymbol);
+      if (!res.ok) {
+        setError(res.error ?? 'Grid stop failed. Check logs.');
+      } else {
+        setTradeMessage(`Grid stopped for ${selectedSymbol}.`);
+      }
+    } catch {
+      setError('Grid stop failed. Check logs.');
+    } finally {
+      setGridRunning(false);
+      void load(selectedSymbol);
+    }
+  };
+
   const market = data?.market;
   const quote = market?.quoteAsset ?? data?.quoteAsset;
   const openPositions = useMemo(() => {
@@ -345,6 +410,18 @@ function App() {
               {data?.homeAsset ? ` · Home: ${data.homeAsset}` : ''}
             </p>
           )}
+          {data?.gridEnabled !== undefined && (
+            <p className="muted">
+              Grid: {data.gridEnabled ? 'on' : 'off'}
+              {data.gridEnabled ? ` (${data.gridMaxAllocPct ?? '—'}% / ${data.gridMaxActiveGrids ?? '—'} grids)` : ''}
+              {data?.grids
+                ? (() => {
+                    const running = Object.values(data.grids).filter((g) => g.status === 'running');
+                    return running.length ? ` · Active: ${running.map((g) => g.symbol).join(', ')}` : '';
+                  })()
+                : ''}
+            </p>
+          )}
           {data?.equity && (
             <p className="muted">
               Equity {data.equity.lastHome.toLocaleString(undefined, { maximumFractionDigits: 2 })} {data.equity.homeAsset} · PnL{' '}
@@ -412,6 +489,12 @@ function App() {
                 : data?.tradeVenue === 'futures'
                   ? 'Panic: close futures'
                   : `Panic: liquidate to ${data?.homeAsset ?? 'HOME'}`}
+            </button>
+            <button className="btn soft" onClick={onStartGrid} disabled={gridRunning || data?.tradeVenue === 'futures'}>
+              Start grid
+            </button>
+            <button className="btn soft" onClick={onStopGrid} disabled={gridRunning || data?.tradeVenue === 'futures'}>
+              Stop grid
             </button>
             <button className="btn ghost" onClick={toggleEmergencyStop} disabled={refreshing}>
               {data?.emergencyStop ? 'Resume auto-trade' : 'Emergency stop'}
@@ -491,6 +574,26 @@ function App() {
           <div className="row">
             <ul className="signals">
               {data.rankedCandidates.slice(0, 10).map((c) => (
+                <li key={c.symbol}>
+                  {c.symbol}: {c.score.toFixed(2)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
+
+      {data?.rankedGridCandidates?.length ? (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <p className="eyebrow">Grid</p>
+              <h3>Top grid candidates (score)</h3>
+            </div>
+          </div>
+          <div className="row">
+            <ul className="signals">
+              {data.rankedGridCandidates.slice(0, 10).map((c) => (
                 <li key={c.symbol}>
                   {c.symbol}: {c.score.toFixed(2)}
                 </li>

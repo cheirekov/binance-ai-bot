@@ -23,10 +23,11 @@ export const loadState = (): PersistedPayload => {
       strategies: parsed.strategies ?? {},
       lastTrades: parsed.lastTrades ?? {},
       positions: parsed.positions ?? {},
+      grids: parsed.grids ?? {},
       meta: parsed.meta ?? {},
     };
   } catch {
-    return { strategies: {}, lastTrades: {}, positions: {}, meta: {} };
+    return { strategies: {}, lastTrades: {}, positions: {}, grids: {}, meta: {} };
   }
 };
 
@@ -67,6 +68,16 @@ export const persistPosition = (
     persisted.positions[key] = position;
   } else {
     delete persisted.positions[key];
+  }
+  saveState(persisted);
+};
+
+export const persistGrid = (persisted: PersistedPayload, symbol: string, grid: PersistedPayload['grids'][string] | null) => {
+  const upper = symbol.toUpperCase();
+  if (grid) {
+    persisted.grids[upper] = grid;
+  } else {
+    delete persisted.grids[upper];
   }
   saveState(persisted);
 };

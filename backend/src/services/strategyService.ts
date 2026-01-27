@@ -268,6 +268,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
         : Object.keys(stateBySymbol);
   const availableSymbols = universeSymbols.filter((s) => !blocked.has(s.toUpperCase()));
   const rankedCandidates = lastCandidates.filter((c) => !blocked.has(c.symbol.toUpperCase()));
+  const rankedGridCandidates = (persisted.meta?.rankedGridCandidates ?? []).filter((c) => !blocked.has(c.symbol.toUpperCase()));
   const positionsForVenue = Object.fromEntries(
     Object.entries(persisted.positions).filter(([, p]) => (p?.venue ?? 'spot') === config.tradeVenue),
   );
@@ -293,11 +294,19 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     portfolioMaxAllocPct: config.portfolioMaxAllocPct,
     portfolioMaxPositions: config.portfolioMaxPositions,
     conversionEnabled: config.conversionEnabled,
+    gridEnabled: config.gridEnabled,
+    gridMaxAllocPct: config.gridMaxAllocPct,
+    gridMaxActiveGrids: config.gridMaxActiveGrids,
+    gridLevels: config.gridLevels,
+    gridRebalanceSeconds: config.gridRebalanceSeconds,
     activeSymbol,
     autoSelectUpdatedAt: lastAutoSelectAt,
     rankedCandidates: rankedCandidates.slice(0, 25),
+    rankedGridCandidates: rankedGridCandidates.slice(0, 25),
+    gridUpdatedAt: persisted.meta?.gridUpdatedAt ?? null,
     lastAutoTrade: persisted.meta?.lastAutoTrade,
     positions: positionsForVenue,
+    grids: persisted.grids ?? {},
     equity: persisted.meta?.equity,
     lastUpdated: state.lastUpdated,
     error: state.error,

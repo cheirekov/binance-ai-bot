@@ -20,6 +20,37 @@ export interface Balance {
   locked: number;
 }
 
+export type GridStatus = 'running' | 'stopped' | 'error';
+
+export interface GridOrder {
+  orderId: number;
+  side: Side;
+  price: number;
+  quantity: number;
+  placedAt: number;
+  lastSeenAt?: number;
+}
+
+export interface GridState {
+  symbol: string;
+  status: GridStatus;
+  baseAsset: string;
+  quoteAsset: string;
+  homeAsset: string;
+  lowerPrice: number;
+  upperPrice: number;
+  levels: number;
+  prices: number[];
+  orderNotionalHome: number;
+  allocationHome: number;
+  bootstrapBasePct: number;
+  createdAt: number;
+  updatedAt: number;
+  lastTickAt?: number;
+  lastError?: string;
+  ordersByLevel: Record<string, GridOrder>;
+}
+
 export interface RiskSettings {
   maxPositionSizeUsdt: number;
   riskPerTradeFraction: number;
@@ -93,6 +124,8 @@ export interface StrategyResponsePayload {
   activeSymbol?: string;
   autoSelectUpdatedAt?: number | null;
   rankedCandidates?: { symbol: string; score: number }[];
+  rankedGridCandidates?: { symbol: string; score: number }[];
+  gridUpdatedAt?: number | null;
   lastAutoTrade?: {
     at: number;
     symbol: string;
@@ -102,6 +135,12 @@ export interface StrategyResponsePayload {
     orderId?: string | number;
   };
   positions?: PersistedPayload['positions'];
+  grids?: PersistedPayload['grids'];
+  gridEnabled?: boolean;
+  gridMaxAllocPct?: number;
+  gridMaxActiveGrids?: number;
+  gridLevels?: number;
+  gridRebalanceSeconds?: number;
   equity?: NonNullable<PersistedPayload['meta']>['equity'];
   emergencyStop?: boolean;
   emergencyStopAt?: number;
@@ -135,10 +174,14 @@ export interface PersistedPayload {
       openedAt: number;
     }
   >;
+  grids: Record<string, GridState>;
   meta?: {
     activeSymbol?: string;
     autoSelectUpdatedAt?: number;
     rankedCandidates?: { symbol: string; score: number }[];
+    rankedGridCandidates?: { symbol: string; score: number }[];
+    gridUpdatedAt?: number;
+    gridRebalanceAt?: number;
     lastAutoTrade?: StrategyResponsePayload['lastAutoTrade'];
     ocoReconcileAt?: number;
     emergencyStop?: boolean;

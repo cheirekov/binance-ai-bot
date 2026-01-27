@@ -378,6 +378,30 @@ export const cancelOcoOrder = async (symbol: string, orderListId: number) => {
   return data;
 };
 
+export const getOpenOrders = async (symbol?: string): Promise<unknown[]> => {
+  if (isFuturesVenue()) {
+    throw new Error('Open orders (spot) not supported in futures mode');
+  }
+  const { data } = await client.openOrders(symbol ? { symbol } : {});
+  return Array.isArray(data) ? (data as unknown[]) : [];
+};
+
+export const getOrder = async (symbol: string, orderId: number): Promise<unknown> => {
+  if (isFuturesVenue()) {
+    return signedFuturesRequest('GET', '/fapi/v1/order', { symbol: symbol.toUpperCase(), orderId });
+  }
+  const { data } = await client.getOrder(symbol, { orderId });
+  return data;
+};
+
+export const cancelOrder = async (symbol: string, orderId: number): Promise<unknown> => {
+  if (isFuturesVenue()) {
+    return signedFuturesRequest('DELETE', '/fapi/v1/order', { symbol: symbol.toUpperCase(), orderId });
+  }
+  const { data } = await client.cancelOrder(symbol, { orderId });
+  return data;
+};
+
 export const getOpenOcoOrders = async (): Promise<unknown[]> => {
   if (isFuturesVenue()) {
     throw new Error('OCO is only supported in spot mode');

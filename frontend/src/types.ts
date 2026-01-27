@@ -17,6 +17,37 @@ export interface Balance {
   locked: number;
 }
 
+export type GridStatus = 'running' | 'stopped' | 'error';
+
+export interface GridOrder {
+  orderId: number;
+  side: 'BUY' | 'SELL';
+  price: number;
+  quantity: number;
+  placedAt: number;
+  lastSeenAt?: number;
+}
+
+export interface GridState {
+  symbol: string;
+  status: GridStatus;
+  baseAsset: string;
+  quoteAsset: string;
+  homeAsset: string;
+  lowerPrice: number;
+  upperPrice: number;
+  levels: number;
+  prices: number[];
+  orderNotionalHome: number;
+  allocationHome: number;
+  bootstrapBasePct: number;
+  createdAt: number;
+  updatedAt: number;
+  lastTickAt?: number;
+  lastError?: string;
+  ordersByLevel: Record<string, GridOrder>;
+}
+
 export interface StrategyPlan {
   horizon: Horizon;
   thesis: string;
@@ -66,9 +97,16 @@ export interface StrategyResponse {
   portfolioMaxAllocPct?: number;
   portfolioMaxPositions?: number;
   conversionEnabled?: boolean;
+  gridEnabled?: boolean;
+  gridMaxAllocPct?: number;
+  gridMaxActiveGrids?: number;
+  gridLevels?: number;
+  gridRebalanceSeconds?: number;
   activeSymbol?: string;
   autoSelectUpdatedAt?: number | null;
   rankedCandidates?: { symbol: string; score: number }[];
+  rankedGridCandidates?: { symbol: string; score: number }[];
+  gridUpdatedAt?: number | null;
   lastAutoTrade?: {
     at: number;
     symbol: string;
@@ -88,6 +126,7 @@ export interface StrategyResponse {
       openedAt: number;
     }
   >;
+  grids?: Record<string, GridState>;
   equity?: {
     homeAsset: string;
     startAt: number;

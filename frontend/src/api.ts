@@ -58,3 +58,13 @@ export const setEmergencyStop = async (enabled: boolean, reason?: string) => {
   const { data } = await api.post('/bot/emergency-stop', { enabled, reason });
   return data as { ok: boolean; enabled: boolean; at: number };
 };
+
+export const startGrid = async (symbol: string) => {
+  const { data } = await api.post('/grid/start', { symbol });
+  return data as { ok: boolean; error?: string };
+};
+
+export const stopGrid = async (symbol: string) => {
+  const { data } = await api.post('/grid/stop', { symbol });
+  return data as { ok: boolean; error?: string };
+};

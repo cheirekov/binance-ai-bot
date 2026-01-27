@@ -14,6 +14,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
+import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
@@ -957,6 +958,11 @@ const portfolioTick = async (seedSymbol?: string) => {
   }
   const maxAllocHome = (allocBaseHome * config.portfolioMaxAllocPct) / 100;
   const blockedSymbols = accountBlacklistSet();
+  if (config.gridEnabled) {
+    for (const grid of Object.values(persisted.grids ?? {})) {
+      if (grid?.status === 'running') blockedSymbols.add(grid.symbol.toUpperCase());
+    }
+  }
 
   // Global risk-off on negative sentiment (cached by news service).
   const news = await getNewsSentiment();
@@ -1543,6 +1549,13 @@ export const autoTradeTick = async (symbol?: string) => {
   }
 
   try {
+    if (config.gridEnabled) {
+      await startOrSyncGrids();
+    }
+    if (!config.portfolioEnabled && config.gridEnabled) {
+      await updateEquityTelemetry();
+      return;
+    }
     if (config.portfolioEnabled) {
       await portfolioTick(symbol);
     } else {

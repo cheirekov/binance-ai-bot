@@ -5,6 +5,7 @@ import { get24hStats, getBalances, getFuturesPositions, placeOrder } from '../bi
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { startGrid, stopGrid } from '../services/gridTrader.js';
 import { getPersistedState, persistMeta } from '../services/persistence.js';
 import { Balance } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
@@ -27,6 +28,10 @@ const sweepSchema = z.object({
   keepAllowedQuotes: z.boolean().optional().default(true),
   keepPositionAssets: z.boolean().optional().default(true),
   keepAssets: z.array(z.string().min(1)).optional().default([]),
+});
+
+const gridSymbolSchema = z.object({
+  symbol: z.string().min(5).max(20),
 });
 
 type LiquidationAction =
@@ -89,6 +94,28 @@ export async function controlRoutes(fastify: FastifyInstance) {
     });
 
     return { ok: true, enabled: parseResult.data.enabled, at: now };
+  });
+
+  fastify.post('/grid/start', async (request, reply) => {
+    const parseResult = gridSymbolSchema.safeParse(request.body ?? {});
+    if (!parseResult.success) {
+      reply.status(400);
+      return { error: parseResult.error.flatten() };
+    }
+    const res = await startGrid(parseResult.data.symbol);
+    if (!res.ok) reply.status(400);
+    return res;
+  });
+
+  fastify.post('/grid/stop', async (request, reply) => {
+    const parseResult = gridSymbolSchema.safeParse(request.body ?? {});
+    if (!parseResult.success) {
+      reply.status(400);
+      return { error: parseResult.error.flatten() };
+    }
+    const res = await stopGrid(parseResult.data.symbol);
+    if (!res.ok) reply.status(400);
+    return res;
   });
 
   fastify.post('/portfolio/panic-liquidate', async (request, reply) => {
@@ -395,19 +422,40 @@ export async function controlRoutes(fastify: FastifyInstance) {
       }
 
       const requestedQty = free;
+      const adjustedQty = floorToStep(requestedQty, pair.stepSize);
+      if (!Number.isFinite(adjustedQty) || adjustedQty <= 0) {
+        actions.push({ asset, status: 'skipped', reason: `Dust: qty ${requestedQty} rounds to 0 (stepSize=${pair.stepSize ?? 'n/a'})` });
+        continue;
+      }
+      if (pair.minQty && adjustedQty < pair.minQty) {
+        actions.push({ asset, status: 'skipped', reason: `Dust: qty ${adjustedQty} below minQty ${pair.minQty}` });
+        continue;
+      }
+      if (pair.minNotional) {
+        try {
+          const snap = await get24hStats(pair.symbol);
+          const notional = adjustedQty * snap.price;
+          if (notional < pair.minNotional) {
+            actions.push({ asset, status: 'skipped', reason: `Dust: notional ${notional.toFixed(8)} below minNotional ${pair.minNotional}` });
+            continue;
+          }
+        } catch {
+          // If pricing fails, let placeOrder validate; worst-case it becomes an 'error' action.
+        }
+      }
       if (dryRun) {
-        actions.push({ asset, symbol: pair.symbol, side: 'SELL', requestedQty, status: 'simulated' });
+        actions.push({ asset, symbol: pair.symbol, side: 'SELL', requestedQty: adjustedQty, status: 'simulated' });
         continue;
       }
 
       try {
-        const order = await placeOrder({ symbol: pair.symbol, side: 'SELL', quantity: requestedQty, type: 'MARKET' });
+        const order = await placeOrder({ symbol: pair.symbol, side: 'SELL', quantity: adjustedQty, type: 'MARKET' });
         const executedQty = extractExecutedQty(order) ?? undefined;
         actions.push({
           asset,
           symbol: pair.symbol,
           side: 'SELL',
-          requestedQty,
+          requestedQty: adjustedQty,
           executedQty,
           orderId: (order as { orderId?: string | number } | undefined)?.orderId,
           status: 'placed',
