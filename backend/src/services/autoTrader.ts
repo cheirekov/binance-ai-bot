@@ -14,6 +14,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
+import { runAiPolicy } from './aiPolicy.js';
 import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
@@ -924,7 +925,13 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
   persistMeta(persisted, { ocoReconcileAt: now });
 };
 
-const portfolioTick = async (seedSymbol?: string) => {
+const portfolioTick = async (
+  seedSymbol?: string,
+  options?: {
+    entriesAllowed?: boolean;
+    forceEntry?: { symbol: string; horizon: 'short' | 'medium' | 'long' };
+  },
+) => {
   const now = Date.now();
   const symbols = await fetchTradableSymbols();
   await reconcileOcoForPositions(symbols);
@@ -1042,6 +1049,13 @@ const portfolioTick = async (seedSymbol?: string) => {
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), symbol: pos.symbol }, 'Exit check refresh failed');
     }
+	  }
+
+  const forceEntry = options?.forceEntry;
+  const entriesAllowed = forceEntry ? true : (options?.entriesAllowed ?? true);
+  if (!entriesAllowed) {
+    recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: 'AI policy: HOLD (entries disabled)' });
+    return;
   }
 
   const openCount = countOpenPositions();
@@ -1058,9 +1072,11 @@ const portfolioTick = async (seedSymbol?: string) => {
   }
 
   const ranked = persisted.meta?.rankedCandidates?.map((c) => c.symbol.toUpperCase()) ?? [];
-  const universe = Array.from(new Set([state.symbol.toUpperCase(), ...ranked]))
-    .filter((s) => !blockedSymbols.has(s.toUpperCase()))
-    .slice(0, 20);
+  const universe = forceEntry
+    ? [forceEntry.symbol.toUpperCase()].filter((s) => !blockedSymbols.has(s.toUpperCase()))
+    : Array.from(new Set([state.symbol.toUpperCase(), ...ranked]))
+        .filter((s) => !blockedSymbols.has(s.toUpperCase()))
+        .slice(0, 20);
 
   for (const candidate of universe) {
     const hasOpen = Object.values(persisted.positions).some(
@@ -1082,7 +1098,7 @@ const portfolioTick = async (seedSymbol?: string) => {
     if (!candidateState.strategies || !candidateState.market) continue;
     if (candidateState.tradeHalted) continue;
 
-    const horizon = selectHorizon(candidateState.market.price, candidateState.strategies);
+    const horizon = forceEntry?.horizon ?? selectHorizon(candidateState.market.price, candidateState.strategies);
     const plan = candidateState.strategies[horizon];
     const entry = plan.entries[0];
     if (config.tradeVenue === 'spot' && entry.side !== 'BUY') continue; // spot bot does not open short positions
@@ -1253,7 +1269,10 @@ const portfolioTick = async (seedSymbol?: string) => {
   recordDecision({ at: now, symbol: state.symbol, action: 'skipped', reason: 'No eligible candidates to open' });
 };
 
-const singleSymbolTick = async (symbol?: string) => {
+const singleSymbolTick = async (
+  symbol?: string,
+  options?: { entriesAllowed?: boolean; horizonOverride?: 'short' | 'medium' | 'long' },
+) => {
   const now = Date.now();
   const symbols = await fetchTradableSymbols();
   await reconcileOcoForPositions(symbols);
@@ -1263,7 +1282,7 @@ const singleSymbolTick = async (symbol?: string) => {
     return;
   }
 
-  const horizon = selectHorizon(state.market.price, state.strategies);
+  const horizon = options?.horizonOverride ?? selectHorizon(state.market.price, state.strategies);
   const plan = state.strategies[horizon];
   const entry = plan.entries[0];
   const positionKey = getPositionKey(state.symbol, horizon);
@@ -1367,6 +1386,11 @@ const singleSymbolTick = async (symbol?: string) => {
 
   if (state.tradeHalted) {
     recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: `Risk flags: ${state.riskFlags.join('; ')}` });
+    return;
+  }
+
+  if (options?.entriesAllowed === false) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'AI policy: HOLD (entries disabled)' });
     return;
   }
 
@@ -1535,6 +1559,21 @@ export const autoTradeTick = async (symbol?: string) => {
     return;
   }
 
+  if (config.aiPolicyMode === 'advisory') {
+    const aiDecision = await runAiPolicy(symbol);
+    recordDecision({
+      at: aiDecision?.at ?? Date.now(),
+      symbol: aiDecision?.symbol ?? symbol ?? 'UNKNOWN',
+      horizon: aiDecision?.horizon,
+      action: 'skipped',
+      reason: aiDecision
+        ? `AI policy advisory: ${aiDecision.action}${aiDecision.reason ? ` · ${aiDecision.reason}` : ''}`.slice(0, 200)
+        : 'AI policy advisory: rate-limited',
+    });
+    await updateEquityTelemetry();
+    return;
+  }
+
   if (!config.tradingEnabled) {
     logger.warn('Auto-trade enabled but TRADING_ENABLED=false; skipping');
     recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'TRADING_ENABLED=false' });
@@ -1548,7 +1587,113 @@ export const autoTradeTick = async (symbol?: string) => {
     return;
   }
 
+  const aiDecision = await runAiPolicy(symbol);
+  if (config.aiPolicyMode === 'gated-live' && !aiDecision) {
+    // If AI policy is enabled but rate-limited/unavailable, hold (manage exits, no new entries).
+    if (config.gridEnabled) {
+      await startOrSyncGrids();
+    }
+    if (!config.portfolioEnabled && config.gridEnabled) {
+      await updateEquityTelemetry();
+      return;
+    }
+    if (config.portfolioEnabled) {
+      await portfolioTick(symbol, { entriesAllowed: false });
+    } else {
+      await singleSymbolTick(symbol, { entriesAllowed: false });
+    }
+    await updateEquityTelemetry();
+    return;
+  }
+
   try {
+    if (config.aiPolicyMode === 'gated-live' && aiDecision) {
+      if (aiDecision.action === 'PANIC') {
+        persistMeta(persisted, { emergencyStop: true, emergencyStopAt: Date.now(), emergencyStopReason: 'ai-policy' });
+        recordDecision({
+          at: aiDecision.at,
+          symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
+          action: 'skipped',
+          reason: `AI policy PANIC: ${aiDecision.reason}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'CLOSE' && aiDecision.positionKey) {
+        const pos = persisted.positions[aiDecision.positionKey];
+        if (!pos || positionVenue(pos) !== config.tradeVenue) {
+          recordDecision({
+            at: aiDecision.at,
+            symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
+            action: 'skipped',
+            reason: `AI policy CLOSE ignored: unknown positionKey ${aiDecision.positionKey}`.slice(0, 200),
+          });
+          await updateEquityTelemetry();
+          return;
+        }
+
+        const symbols = await fetchTradableSymbols();
+        let balances: Balance[] = [];
+        try {
+          balances = await refreshBalancesFromState();
+        } catch {
+          balances = [];
+        }
+        const closed = await closePosition(symbols, aiDecision.positionKey, pos, balances);
+        recordDecision({
+          at: aiDecision.at,
+          symbol: pos.symbol,
+          horizon: pos.horizon,
+          action: actionFromCloseNote(closed.note),
+          reason: closed.note ?? `AI policy CLOSE: ${aiDecision.reason}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'OPEN' && aiDecision.symbol && aiDecision.horizon) {
+        if (config.gridEnabled) {
+          await startOrSyncGrids();
+        }
+        if (!config.portfolioEnabled && config.gridEnabled) {
+          recordDecision({
+            at: aiDecision.at,
+            symbol: aiDecision.symbol,
+            horizon: aiDecision.horizon,
+            action: 'skipped',
+            reason: 'AI policy OPEN ignored: grid-only mode (enable PORTFOLIO_ENABLED for mixed trading)',
+          });
+          await updateEquityTelemetry();
+          return;
+        }
+        if (config.portfolioEnabled) {
+          await portfolioTick(aiDecision.symbol, { forceEntry: { symbol: aiDecision.symbol, horizon: aiDecision.horizon } });
+        } else {
+          await singleSymbolTick(aiDecision.symbol, { horizonOverride: aiDecision.horizon });
+        }
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'HOLD') {
+        if (config.gridEnabled) {
+          await startOrSyncGrids();
+        }
+        if (!config.portfolioEnabled && config.gridEnabled) {
+          await updateEquityTelemetry();
+          return;
+        }
+        if (config.portfolioEnabled) {
+          await portfolioTick(symbol, { entriesAllowed: false });
+        } else {
+          await singleSymbolTick(symbol, { entriesAllowed: false });
+        }
+        await updateEquityTelemetry();
+        return;
+      }
+    }
+
     if (config.gridEnabled) {
       await startOrSyncGrids();
     }

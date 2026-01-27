@@ -2,6 +2,22 @@ export type Horizon = 'short' | 'medium' | 'long';
 
 export type Side = 'BUY' | 'SELL';
 
+export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
+
+export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
+
+export interface AiPolicyDecision {
+  at: number;
+  mode: AiPolicyMode;
+  action: AiPolicyAction;
+  symbol?: string;
+  horizon?: Horizon;
+  positionKey?: string;
+  confidence: number;
+  reason: string;
+  model?: string;
+}
+
 export interface MarketSnapshot {
   symbol: string;
   price: number;
@@ -142,6 +158,8 @@ export interface StrategyResponsePayload {
   gridLevels?: number;
   gridRebalanceSeconds?: number;
   equity?: NonNullable<PersistedPayload['meta']>['equity'];
+  aiPolicyMode?: AiPolicyMode;
+  aiPolicy?: NonNullable<PersistedPayload['meta']>['aiPolicy'];
   emergencyStop?: boolean;
   emergencyStopAt?: number;
   emergencyStopReason?: string;
@@ -183,6 +201,12 @@ export interface PersistedPayload {
     gridUpdatedAt?: number;
     gridRebalanceAt?: number;
     lastAutoTrade?: StrategyResponsePayload['lastAutoTrade'];
+    aiPolicy?: {
+      date: string;
+      calls: number;
+      lastAt?: number;
+      lastDecision?: AiPolicyDecision;
+    };
     ocoReconcileAt?: number;
     emergencyStop?: boolean;
     emergencyStopAt?: number;

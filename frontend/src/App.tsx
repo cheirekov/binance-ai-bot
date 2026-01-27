@@ -422,6 +422,18 @@ function App() {
                 : ''}
             </p>
           )}
+          {data?.aiPolicyMode !== undefined && (
+            <p className="muted">
+              AI policy: {data.aiPolicyMode}
+              {data.aiPolicy?.lastDecision
+                ? ` · ${data.aiPolicy.lastDecision.action}${
+                    data.aiPolicy.lastDecision.symbol ? ` ${data.aiPolicy.lastDecision.symbol}` : ''
+                  }${data.aiPolicy.lastDecision.horizon ? ` (${data.aiPolicy.lastDecision.horizon})` : ''} · ${new Date(
+                    data.aiPolicy.lastDecision.at,
+                  ).toLocaleTimeString()} · ${(data.aiPolicy.lastDecision.confidence * 100).toFixed(0)}%`
+                : ''}
+            </p>
+          )}
           {data?.equity && (
             <p className="muted">
               Equity {data.equity.lastHome.toLocaleString(undefined, { maximumFractionDigits: 2 })} {data.equity.homeAsset} · PnL{' '}

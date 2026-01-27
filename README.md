@@ -19,6 +19,8 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
    - Futures (advanced, higher risk): set `TRADE_VENUE=futures`, provide a key with futures permissions, and set `FUTURES_ENABLED=true`. Start with low leverage (e.g. `FUTURES_LEVERAGE=2`) and test on futures testnet first.
    - Portfolio mode (optional): set `PORTFOLIO_ENABLED=true`, choose `HOME_ASSET` (e.g. `USDC`), and optionally `CONVERSION_ENABLED=true` if you allow auto-converting into BTC/XRP quotes.
    - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only** and only run on symbols quoted in `HOME_ASSET` (e.g. `BTCUSDC` if `HOME_ASSET=USDC`). Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC`.
+   - AI policy (optional): set `AI_POLICY_MODE=advisory` (no trading) or `AI_POLICY_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
+   - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `OPENAI_BASE_URL` (for example: local `ollama`, `llama.cpp` server, or `vLLM`).
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.
 3) Start API: `npm run dev --workspace backend` (listens on `8788`).
@@ -65,4 +67,5 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `DAILY_LOSS_CAP_PCT` enables emergency stop when equity drawdown exceeds the threshold (PnL baseline resets daily).
 - News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages). Many sites (including Binance news pages) serve HTML and/or block server-side fetches.
 - Grid mode is **spot-only** and works best in sideways markets. In trends/breakouts it can accumulate losses; keep `GRID_MAX_ALLOC_PCT` small until you’re confident. Use `GRID_BREAKOUT_ACTION=cancel` to stop grids when price exits the range.
+- AI policy is **gated**: it can only choose actions/symbols from data the bot provides, and the engine still enforces exchange rules (minQty/minNotional), risk flags, allocation caps, and daily loss caps. It can still lose money—test on small size or testnet first.
 - State is persisted to `PERSISTENCE_PATH` (default `./data/state.json`) so the bot resumes last strategies/balances after restart.

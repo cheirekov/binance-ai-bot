@@ -299,6 +299,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     gridMaxActiveGrids: config.gridMaxActiveGrids,
     gridLevels: config.gridLevels,
     gridRebalanceSeconds: config.gridRebalanceSeconds,
+    aiPolicyMode: config.aiPolicyMode,
+    aiPolicy: persisted.meta?.aiPolicy,
     activeSymbol,
     autoSelectUpdatedAt: lastAutoSelectAt,
     rankedCandidates: rankedCandidates.slice(0, 25),

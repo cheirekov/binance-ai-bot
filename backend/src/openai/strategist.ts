@@ -5,7 +5,9 @@ import { logger } from '../logger.js';
 import { Horizon, MarketSnapshot, RiskSettings } from '../types.js';
 import { errorToLogObject } from '../utils/errors.js';
 
-const client = config.openAiApiKey ? new OpenAI({ apiKey: config.openAiApiKey }) : null;
+const client = config.openAiApiKey
+  ? new OpenAI({ apiKey: config.openAiApiKey, baseURL: config.openAiBaseUrl || undefined })
+  : null;
 const cacheTtlMs = 30 * 60 * 1000;
 const insightCache: Record<string, { fetchedAt: number; value: AiInsight }> = {};
 

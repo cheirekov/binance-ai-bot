@@ -19,6 +19,29 @@ export interface Balance {
 
 export type GridStatus = 'running' | 'stopped' | 'error';
 
+export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
+
+export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
+
+export interface AiPolicyDecision {
+  at: number;
+  mode: AiPolicyMode;
+  action: AiPolicyAction;
+  symbol?: string;
+  horizon?: Horizon;
+  positionKey?: string;
+  confidence: number;
+  reason: string;
+  model?: string;
+}
+
+export interface AiPolicyMeta {
+  date: string;
+  calls: number;
+  lastAt?: number;
+  lastDecision?: AiPolicyDecision;
+}
+
 export interface GridOrder {
   orderId: number;
   side: 'BUY' | 'SELL';
@@ -115,6 +138,8 @@ export interface StrategyResponse {
     reason?: string;
     orderId?: string | number;
   };
+  aiPolicyMode?: AiPolicyMode;
+  aiPolicy?: AiPolicyMeta;
   positions?: Record<
     string,
     {
