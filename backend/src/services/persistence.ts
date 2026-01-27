@@ -8,6 +8,8 @@ import { errorToLogObject } from '../utils/errors.js';
 
 let singleton: PersistedPayload | null = null;
 
+const isSymbolKey = (value: string) => /^[A-Z0-9]{2,30}$/.test(value.toUpperCase());
+
 const ensureDir = (filePath: string) => {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
@@ -19,11 +21,26 @@ export const loadState = (): PersistedPayload => {
   try {
     const raw = fs.readFileSync(config.persistencePath, 'utf-8');
     const parsed = JSON.parse(raw) as PersistedPayload;
+    const rawGrids = parsed.grids ?? {};
+    const grids: PersistedPayload['grids'] = {};
+    const droppedGridKeys: string[] = [];
+    for (const [key, grid] of Object.entries(rawGrids)) {
+      const upper = key.toUpperCase();
+      if (!isSymbolKey(upper)) {
+        droppedGridKeys.push(key);
+        continue;
+      }
+      if (!grid) continue;
+      grids[upper] = { ...grid, symbol: upper };
+    }
+    if (droppedGridKeys.length > 0) {
+      logger.warn({ droppedGridKeys }, 'Dropped invalid grid keys from persisted state');
+    }
     return {
       strategies: parsed.strategies ?? {},
       lastTrades: parsed.lastTrades ?? {},
       positions: parsed.positions ?? {},
-      grids: parsed.grids ?? {},
+      grids,
       meta: parsed.meta ?? {},
     };
   } catch {

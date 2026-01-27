@@ -3,65 +3,96 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const numberFromEnv = (value: string | undefined, fallback: number): number => {
-  const parsed = Number(value);
+  const cleaned = stripInlineComment(value);
+  const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const stripInlineComment = (value: string | undefined): string | undefined => {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed.startsWith('#')) return '';
+  // Treat " ... # comment" as comment, but keep hashes inside tokens (e.g. URL fragments).
+  const match = value.match(/(^|\s)#/);
+  if (!match || match.index === undefined) return value;
+  const idx = match.index + (match[1] ? match[1].length : 0);
+  return value.slice(0, idx).trimEnd();
+};
+
+const stringFromEnv = (value: string | undefined, fallback: string): string => {
+  const cleaned = stripInlineComment(value);
+  if (cleaned === undefined) return fallback;
+  const trimmed = cleaned.trim();
+  return trimmed === '' ? fallback : trimmed;
+};
+
+const optionalStringFromEnv = (value: string | undefined, fallback = ''): string => {
+  const cleaned = stripInlineComment(value);
+  if (cleaned === undefined) return fallback;
+  return cleaned.trim();
+};
+
 const listFromEnvUpper = (value: string | undefined, fallback: string[]): string[] => {
-  if (value === undefined) return fallback;
-  if (value.trim() === '') return [];
-  return value
+  const cleaned = stripInlineComment(value);
+  if (cleaned === undefined) return fallback;
+  if (cleaned.trim() === '') return [];
+  return cleaned
     .split(',')
     .map((v) => v.trim().toUpperCase())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((v) => /^[A-Z0-9]{2,30}$/.test(v));
 };
 
 const listFromEnvRaw = (value: string | undefined, fallback: string[]): string[] => {
-  if (value === undefined) return fallback;
-  if (value.trim() === '') return [];
-  return value
+  const cleaned = stripInlineComment(value);
+  if (cleaned === undefined) return fallback;
+  if (cleaned.trim() === '') return [];
+  return cleaned
     .split(',')
     .map((v) => v.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((v) => !v.startsWith('#'));
 };
 
 const boolFromEnv = (value: string | undefined, fallback = false): boolean => {
-  if (value === undefined) return fallback;
-  return value.toLowerCase() === 'true';
+  const cleaned = stripInlineComment(value);
+  if (cleaned === undefined) return fallback;
+  return cleaned.trim().toLowerCase() === 'true';
 };
 
 const tradeVenueFromEnv = (value: string | undefined): 'spot' | 'futures' => {
-  const v = (value ?? 'spot').toLowerCase();
+  const v = (stripInlineComment(value) ?? 'spot').trim().toLowerCase();
   return v === 'futures' ? 'futures' : 'spot';
 };
 
 const oneOf = <T extends string>(value: string | undefined, allowed: readonly T[], fallback: T): T => {
-  if (!value) return fallback;
-  const upper = value.toUpperCase();
+  const cleaned = stripInlineComment(value);
+  if (!cleaned) return fallback;
+  const upper = cleaned.trim().toUpperCase();
   return (allowed.find((v) => v.toUpperCase() === upper) as T | undefined) ?? fallback;
 };
 
 export const config = {
-  env: process.env.NODE_ENV ?? 'development',
+  env: stringFromEnv(process.env.NODE_ENV, 'development'),
   port: numberFromEnv(process.env.PORT, 8788),
-  frontendOrigin: process.env.FRONTEND_ORIGIN ?? 'http://localhost:4173',
-  binanceApiKey: process.env.BINANCE_API_KEY ?? '',
-  binanceApiSecret: process.env.BINANCE_API_SECRET ?? '',
-  binanceBaseUrl: process.env.BINANCE_BASE_URL ?? 'https://api.binance.com',
+  frontendOrigin: stringFromEnv(process.env.FRONTEND_ORIGIN, 'http://localhost:4173'),
+  binanceApiKey: optionalStringFromEnv(process.env.BINANCE_API_KEY),
+  binanceApiSecret: optionalStringFromEnv(process.env.BINANCE_API_SECRET),
+  binanceBaseUrl: stringFromEnv(process.env.BINANCE_BASE_URL, 'https://api.binance.com'),
   tradeVenue: tradeVenueFromEnv(process.env.TRADE_VENUE),
   futuresEnabled: boolFromEnv(process.env.FUTURES_ENABLED, false),
-  futuresBaseUrl: process.env.FUTURES_BASE_URL ?? 'https://fapi.binance.com',
+  futuresBaseUrl: stringFromEnv(process.env.FUTURES_BASE_URL, 'https://fapi.binance.com'),
   futuresLeverage: Math.max(1, Math.min(125, numberFromEnv(process.env.FUTURES_LEVERAGE, 2))),
-  futuresMarginType: ((process.env.FUTURES_MARGIN_TYPE ?? 'ISOLATED').toUpperCase() === 'CROSSED'
+  futuresMarginType: (stringFromEnv(process.env.FUTURES_MARGIN_TYPE, 'ISOLATED').toUpperCase() === 'CROSSED'
     ? 'CROSSED'
     : 'ISOLATED') as 'ISOLATED' | 'CROSSED',
   tradingEnabled: boolFromEnv(process.env.TRADING_ENABLED, false),
-  openAiApiKey: process.env.OPENAI_API_KEY ?? '',
-  openAiModel: process.env.OPENAI_MODEL ?? 'gpt-4.1-mini',
-  openAiBaseUrl: process.env.OPENAI_BASE_URL ?? '',
-  defaultSymbol: (process.env.SYMBOL ?? 'BTCEUR').toUpperCase(),
-  quoteAsset: (process.env.QUOTE_ASSET ?? 'EUR').toUpperCase(),
-  homeAsset: (process.env.HOME_ASSET ?? process.env.QUOTE_ASSET ?? 'EUR').toUpperCase(),
+  openAiApiKey: optionalStringFromEnv(process.env.OPENAI_API_KEY),
+  openAiModel: stringFromEnv(process.env.OPENAI_MODEL, 'gpt-4.1-mini'),
+  openAiBaseUrl: optionalStringFromEnv(process.env.OPENAI_BASE_URL),
+  defaultSymbol: stringFromEnv(process.env.SYMBOL, 'BTCEUR').toUpperCase(),
+  quoteAsset: stringFromEnv(process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
+  homeAsset: stringFromEnv(process.env.HOME_ASSET ?? process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
   allowedSymbols: listFromEnvUpper(process.env.ALLOWED_SYMBOLS, [
     'BTCEUR',
     'ETHEUR',
@@ -88,7 +119,7 @@ export const config = {
   newsCacheMinutes: numberFromEnv(process.env.NEWS_CACHE_MINUTES, 15),
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
   blacklistSymbols: listFromEnvUpper(process.env.BLACKLIST_SYMBOLS, []),
-  persistencePath: process.env.PERSISTENCE_PATH ?? './data/state.json',
+  persistencePath: stringFromEnv(process.env.PERSISTENCE_PATH, './data/state.json'),
   autoTradeEnabled: boolFromEnv(process.env.AUTO_TRADE_ENABLED, false),
   autoTradeHorizon: (process.env.AUTO_TRADE_HORIZON ?? 'short').toLowerCase() as 'short' | 'medium' | 'long',
   autoTradeMinConfidence: numberFromEnv(process.env.AUTO_TRADE_MIN_CONFIDENCE, 55) / 100,
@@ -107,7 +138,7 @@ export const config = {
   gridMaxAllocPct: numberFromEnv(process.env.GRID_MAX_ALLOC_PCT, 25),
   gridMaxActiveGrids: numberFromEnv(process.env.GRID_MAX_ACTIVE_GRIDS, 1),
   gridLevels: numberFromEnv(process.env.GRID_LEVELS, 21),
-  gridKlineInterval: process.env.GRID_KLINE_INTERVAL ?? '1h',
+  gridKlineInterval: stringFromEnv(process.env.GRID_KLINE_INTERVAL, '1h'),
   gridKlineLimit: numberFromEnv(process.env.GRID_KLINE_LIMIT, 120),
   gridMinRangePct: numberFromEnv(process.env.GRID_MIN_RANGE_PCT, 3),
   gridMaxRangePct: numberFromEnv(process.env.GRID_MAX_RANGE_PCT, 15),
@@ -120,12 +151,12 @@ export const config = {
   gridBreakoutAction: oneOf(process.env.GRID_BREAKOUT_ACTION, ['none', 'cancel', 'cancel_and_liquidate'] as const, 'cancel'),
   gridBreakoutBufferPct: numberFromEnv(process.env.GRID_BREAKOUT_BUFFER_PCT, 0.5),
   aiPolicyMode: oneOf(process.env.AI_POLICY_MODE, ['off', 'advisory', 'gated-live'] as const, 'off'),
-  aiPolicyModel: process.env.AI_POLICY_MODEL ?? (process.env.OPENAI_MODEL ?? 'gpt-4.1-mini'),
+  aiPolicyModel: optionalStringFromEnv(process.env.AI_POLICY_MODEL) || optionalStringFromEnv(process.env.OPENAI_MODEL) || 'gpt-4.1-mini',
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),
-  apiKey: process.env.API_KEY ?? '',
-  clientKey: process.env.CLIENT_KEY ?? '',
+  apiKey: optionalStringFromEnv(process.env.API_KEY),
+  clientKey: optionalStringFromEnv(process.env.CLIENT_KEY),
 };
 
 export const feeRate = {
