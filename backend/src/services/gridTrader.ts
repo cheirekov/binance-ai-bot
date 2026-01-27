@@ -1,6 +1,6 @@
-import { cancelOrder, get24hStats, getBalances, getKlines, getOpenOrders, placeOrder } from '../binance/client.js';
+import { cancelOrder, get24hStats, getBalances, getKlines, getOpenOrders, getOrder, placeOrder } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
-import { config } from '../config.js';
+import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, GridOrder, GridState } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
@@ -56,6 +56,110 @@ const floorToTick = (value: number, tick?: number) => {
 };
 
 const balanceFreeMap = (balances: Balance[]) => new Map(balances.map((b) => [b.asset.toUpperCase(), b.free ?? 0]));
+
+const clampNonNegative = (v: number) => (Number.isFinite(v) ? Math.max(0, v) : 0);
+
+const ensurePerformance = (grid: GridState, now: number): NonNullable<GridState['performance']> => {
+  const existing = grid.performance;
+  const allocation = clampNonNegative(grid.allocationHome ?? 0);
+  if (existing && Number.isFinite(existing.startAt) && Number.isFinite(existing.startValueHome)) {
+    return {
+      ...existing,
+      startAt: existing.startAt || grid.createdAt || now,
+      startValueHome: Number.isFinite(existing.startValueHome) ? existing.startValueHome : allocation,
+      lastAt: Number.isFinite(existing.lastAt) ? existing.lastAt : now,
+      lastValueHome: Number.isFinite(existing.lastValueHome) ? existing.lastValueHome : allocation,
+      pnlHome: Number.isFinite(existing.pnlHome) ? existing.pnlHome : 0,
+      pnlPct: Number.isFinite(existing.pnlPct) ? existing.pnlPct : 0,
+      baseVirtual: clampNonNegative(existing.baseVirtual),
+      quoteVirtual: clampNonNegative(existing.quoteVirtual),
+      feesHome: clampNonNegative(existing.feesHome),
+      fillsBuy: Math.max(0, Math.floor(existing.fillsBuy ?? 0)),
+      fillsSell: Math.max(0, Math.floor(existing.fillsSell ?? 0)),
+      breakouts: Math.max(0, Math.floor(existing.breakouts ?? 0)),
+      lastFillAt: existing.lastFillAt,
+    };
+  }
+  return {
+    startAt: grid.createdAt || now,
+    startValueHome: allocation,
+    lastAt: now,
+    lastValueHome: allocation,
+    pnlHome: 0,
+    pnlPct: 0,
+    baseVirtual: 0,
+    quoteVirtual: allocation,
+    feesHome: 0,
+    fillsBuy: 0,
+    fillsSell: 0,
+    breakouts: 0,
+    lastFillAt: undefined,
+  };
+};
+
+const toNumber = (value: unknown): number | null => {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+};
+
+const applyFillToPerformance = (
+  perf: NonNullable<GridState['performance']>,
+  order: unknown,
+  now: number,
+) => {
+  if (!order || typeof order !== 'object') return perf;
+  const rec = order as Record<string, unknown>;
+  const status = String(rec.status ?? '').toUpperCase();
+  const side = String(rec.side ?? '').toUpperCase();
+  const type = String(rec.type ?? '').toUpperCase();
+  if (!status) return perf;
+
+  const executedQty = toNumber(rec.executedQty ?? rec.executedQuantity ?? rec.origQty) ?? 0;
+  if (!Number.isFinite(executedQty) || executedQty <= 0) return perf;
+
+  const quoteQty =
+    toNumber(rec.cummulativeQuoteQty ?? rec.cumulativeQuoteQty ?? rec.cumQuote ?? rec.cumQuoteQty) ??
+    0;
+  const price = toNumber(rec.price) ?? 0;
+  const notional = quoteQty > 0 ? quoteQty : executedQty * Math.max(price, 0.00000001);
+  if (!Number.isFinite(notional) || notional <= 0) return perf;
+
+  const feeEst = notional * (type === 'MARKET' ? feeRate.taker : feeRate.maker);
+
+  const next: NonNullable<GridState['performance']> = { ...perf };
+  if (side === 'BUY') {
+    next.baseVirtual = next.baseVirtual + executedQty;
+    next.quoteVirtual = Math.max(0, next.quoteVirtual - notional);
+    next.fillsBuy = (next.fillsBuy ?? 0) + (status === 'FILLED' || status === 'PARTIALLY_FILLED' ? 1 : 0);
+  } else if (side === 'SELL') {
+    next.baseVirtual = Math.max(0, next.baseVirtual - executedQty);
+    next.quoteVirtual = next.quoteVirtual + notional;
+    next.fillsSell = (next.fillsSell ?? 0) + (status === 'FILLED' || status === 'PARTIALLY_FILLED' ? 1 : 0);
+  }
+  next.feesHome = clampNonNegative(next.feesHome + feeEst);
+  next.lastFillAt = now;
+  return next;
+};
+
+const revaluePerformance = (perf: NonNullable<GridState['performance']>, now: number, price: number) => {
+  const baseValue = clampNonNegative(perf.baseVirtual) * Math.max(price, 0);
+  const gross = baseValue + clampNonNegative(perf.quoteVirtual);
+  const net = Math.max(0, gross - clampNonNegative(perf.feesHome));
+  const start = Math.max(0, perf.startValueHome);
+  const pnl = net - start;
+  const pnlPct = start > 0 ? (pnl / start) * 100 : 0;
+  return {
+    ...perf,
+    lastAt: now,
+    lastValueHome: net,
+    pnlHome: pnl,
+    pnlPct,
+  };
+};
 
 const percentile = (values: number[], p: number) => {
   const clean = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
@@ -227,6 +331,7 @@ const buildGridState = async (symbol: string, balances: Balance[], symbols: Symb
   const orderNotionalHome = maxAlloc / orderCount;
 
   const createdAt = Date.now();
+  const allocation = Math.max(0, maxAlloc);
   return {
     symbol: symbol.toUpperCase(),
     status: 'running',
@@ -238,16 +343,31 @@ const buildGridState = async (symbol: string, balances: Balance[], symbols: Symb
     levels: usableLevels,
     prices: prices.slice(0, usableLevels),
     orderNotionalHome,
-    allocationHome: maxAlloc,
+    allocationHome: allocation,
     bootstrapBasePct: Math.max(0, Math.min(100, config.gridBootstrapBasePct)),
     createdAt,
     updatedAt: createdAt,
     ordersByLevel: {},
+    performance: {
+      startAt: createdAt,
+      startValueHome: allocation,
+      lastAt: createdAt,
+      lastValueHome: allocation,
+      pnlHome: 0,
+      pnlPct: 0,
+      baseVirtual: 0,
+      quoteVirtual: allocation,
+      feesHome: 0,
+      fillsBuy: 0,
+      fillsSell: 0,
+      breakouts: 0,
+      lastFillAt: undefined,
+    },
   };
 };
 
 const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: Balance[], currentPrice: number) => {
-  if (!config.tradingEnabled) return { balances };
+  if (!config.tradingEnabled) return { balances, grid };
   const base = grid.baseAsset.toUpperCase();
   const quote = grid.quoteAsset.toUpperCase();
   const freeBy = balanceFreeMap(balances);
@@ -255,27 +375,32 @@ const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: 
   const freeQuote = freeBy.get(quote) ?? 0;
 
   const targetQuoteSpend = (grid.allocationHome * grid.bootstrapBasePct) / 100;
-  if (targetQuoteSpend <= 0) return { balances };
-  if (freeQuote <= 0) return { balances };
+  if (targetQuoteSpend <= 0) return { balances, grid };
+  if (freeQuote <= 0) return { balances, grid };
 
   // Buy base inventory up to the configured bootstrap percentage.
   const desiredBase = targetQuoteSpend / Math.max(currentPrice, 0.00000001);
   const missing = desiredBase - freeBase;
   const qty = floorToStep(Math.max(0, missing), info.stepSize);
-  if (!Number.isFinite(qty) || qty <= 0) return { balances };
-  if (info.minQty && qty < info.minQty) return { balances };
+  if (!Number.isFinite(qty) || qty <= 0) return { balances, grid };
+  if (info.minQty && qty < info.minQty) return { balances, grid };
   if (info.minNotional && qty * Math.max(currentPrice, 0.00000001) < info.minNotional) {
     // Close enough, but the top-up is below Binance minimums (avoid noisy retries).
-    return { balances };
+    return { balances, grid };
   }
 
   try {
-    await placeOrder({ symbol: grid.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+    const order = await placeOrder({ symbol: grid.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+    const now = Date.now();
+    const perf = ensurePerformance(grid, now);
+    const nextPerf = applyFillToPerformance(perf, order, now);
+    grid = { ...grid, performance: nextPerf };
+    persistGrid(persisted, grid.symbol, grid);
     const refreshed = await getBalances();
-    return { balances: refreshed };
+    return { balances: refreshed, grid };
   } catch (error) {
     logger.warn({ err: errorToLogObject(error), symbol: grid.symbol }, 'Grid bootstrap buy failed');
-    return { balances };
+    return { balances, grid };
   }
 };
 
@@ -295,25 +420,36 @@ const cancelGridOrders = async (grid: GridState) => {
   }
 };
 
-const liquidateGridBaseToHome = async (grid: GridState, info: SymbolInfo, balances: Balance[], price: number) => {
-  if (config.tradeVenue !== 'spot') return;
-  if (!config.tradingEnabled) return;
+const liquidateGridBaseToHome = async (
+  grid: GridState,
+  info: SymbolInfo,
+  balances: Balance[],
+  price: number,
+): Promise<NonNullable<GridState['performance']> | null> => {
+  if (config.tradeVenue !== 'spot') return null;
+  if (!config.tradingEnabled) return null;
 
   const base = grid.baseAsset.toUpperCase();
   const quote = grid.quoteAsset.toUpperCase();
-  if (quote !== config.homeAsset.toUpperCase()) return;
+  if (quote !== config.homeAsset.toUpperCase()) return null;
 
   const freeBy = balanceFreeMap(balances);
   const freeBase = freeBy.get(base) ?? 0;
-  const qty = floorToStep(Math.max(0, freeBase), info.stepSize);
-  if (!Number.isFinite(qty) || qty <= 0) return;
-  if (info.minQty && qty < info.minQty) return;
-  if (info.minNotional && qty * Math.max(price, 0.00000001) < info.minNotional) return;
+  const now = Date.now();
+  const perf = ensurePerformance(grid, now);
+  const maxQty = Math.min(Math.max(0, freeBase), Math.max(0, perf.baseVirtual ?? 0));
+  const qty = floorToStep(Math.max(0, maxQty), info.stepSize);
+  if (!Number.isFinite(qty) || qty <= 0) return null;
+  if (info.minQty && qty < info.minQty) return null;
+  if (info.minNotional && qty * Math.max(price, 0.00000001) < info.minNotional) return null;
 
   try {
-    await placeOrder({ symbol: grid.symbol, side: 'SELL', quantity: qty, type: 'MARKET' });
+    const order = await placeOrder({ symbol: grid.symbol, side: 'SELL', quantity: qty, type: 'MARKET' });
+    const nextPerf = applyFillToPerformance(perf, order, now);
+    return nextPerf;
   } catch (error) {
     logger.warn({ err: errorToLogObject(error), symbol: grid.symbol }, 'Grid liquidation sell failed');
+    return null;
   }
 };
 
@@ -323,15 +459,32 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   const current = snap.price;
   if (!Number.isFinite(current) || current <= 0) throw new Error('Invalid market price');
 
+  const perf0 = ensurePerformance(grid, now);
+
   const bufferPct = Math.max(0, config.gridBreakoutBufferPct) / 100;
   if (config.gridBreakoutAction !== 'none') {
     if (current < grid.lowerPrice * (1 - bufferPct) || current > grid.upperPrice * (1 + bufferPct)) {
       await cancelGridOrders(grid);
+      let perfAfterLiquidation: NonNullable<GridState['performance']> | null = null;
       if (config.gridBreakoutAction === 'cancel_and_liquidate') {
-        await liquidateGridBaseToHome(grid, info, balances, current);
+        perfAfterLiquidation = await liquidateGridBaseToHome(grid, info, balances, current);
       }
       const reason = `Breakout: price ${current} outside [${grid.lowerPrice}, ${grid.upperPrice}]`;
-      const stopped: GridState = { ...grid, status: 'stopped', updatedAt: now, lastTickAt: now, lastError: reason, ordersByLevel: {} };
+      const breakouts = Math.max(0, Math.floor(perfAfterLiquidation?.breakouts ?? perf0.breakouts ?? 0)) + 1;
+      const perf = revaluePerformance(
+        { ...(perfAfterLiquidation ?? perf0), breakouts },
+        now,
+        current,
+      );
+      const stopped: GridState = {
+        ...grid,
+        status: 'stopped',
+        updatedAt: now,
+        lastTickAt: now,
+        lastError: reason,
+        ordersByLevel: {},
+        performance: perf,
+      };
       persistGrid(persisted, grid.symbol, stopped);
       logger.warn({ symbol: grid.symbol, price: current, lower: grid.lowerPrice, upper: grid.upperPrice }, 'Grid stopped on breakout');
       return stopped;
@@ -341,6 +494,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   // Bootstrap base inventory for neutral grids.
   const boot = await ensureBootstrapBase(grid, info, balances, current);
   balances = boot.balances;
+  grid = boot.grid;
 
   const freeBy = balanceFreeMap(balances);
   const base = grid.baseAsset.toUpperCase();
@@ -367,11 +521,45 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
 
   // Drop stale orders we no longer see as open.
   const nextOrdersByLevel: Record<string, GridOrder> = {};
+  const droppedOrders: GridOrder[] = [];
   for (const [levelKey, order] of Object.entries(grid.ordersByLevel ?? {})) {
     if (openById.has(order.orderId)) {
       nextOrdersByLevel[levelKey] = { ...order, lastSeenAt: now };
+    } else {
+      droppedOrders.push(order);
     }
   }
+
+  let perf = ensurePerformance(grid, now);
+  // Attempt to reconcile any filled/canceled orders that disappeared from open-orders.
+  // This is best-effort and rate-friendly: only check a small number per tick.
+  let checked = 0;
+  const maxChecks = 12;
+  for (const order of droppedOrders) {
+    if (checked >= maxChecks) break;
+    checked += 1;
+    try {
+      const detail = await getOrder(grid.symbol, order.orderId);
+      perf = applyFillToPerformance(perf, detail, now);
+    } catch (error) {
+      logger.warn({ err: errorToLogObject(error), symbol: grid.symbol, orderId: order.orderId }, 'Grid fill reconcile failed');
+    }
+  }
+
+  // Track how much of the grid's virtual inventory is already committed in open orders (best-effort).
+  // Prevents the grid engine from allocating beyond the configured GRID_MAX_ALLOC_PCT budget.
+  let gridAvailableQuote = clampNonNegative(
+    (perf.quoteVirtual ?? 0) -
+      Object.values(nextOrdersByLevel)
+        .filter((o) => o.side === 'BUY')
+        .reduce((sum, o) => sum + o.quantity * o.price, 0),
+  );
+  let gridAvailableBase = clampNonNegative(
+    (perf.baseVirtual ?? 0) -
+      Object.values(nextOrdersByLevel)
+        .filter((o) => o.side === 'SELL')
+        .reduce((sum, o) => sum + o.quantity, 0),
+  );
 
   let placedThisTick = 0;
 
@@ -402,6 +590,11 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
         placedAt: now,
         lastSeenAt: now,
       };
+      if (side === 'BUY') {
+        gridAvailableQuote = Math.max(0, gridAvailableQuote - openMatch.qty * levelPrice);
+      } else {
+        gridAvailableBase = Math.max(0, gridAvailableBase - openMatch.qty);
+      }
       continue;
     }
 
@@ -417,12 +610,14 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     if (side === 'BUY') {
       const required = qty * levelPrice;
       if (required <= 0 || freeQuote < required) continue;
+      if (gridAvailableQuote < required) continue;
       try {
         const order = await placeOrder({ symbol: grid.symbol, side, quantity: qty, price: levelPrice, type: 'LIMIT' });
         const orderId = Number((order as { orderId?: string | number } | undefined)?.orderId ?? 0);
         if (Number.isFinite(orderId) && orderId > 0) {
           nextOrdersByLevel[levelKey] = { orderId, side, price: levelPrice, quantity: qty, placedAt: now, lastSeenAt: now };
           freeQuote -= required;
+          gridAvailableQuote = Math.max(0, gridAvailableQuote - required);
           placedThisTick += 1;
         }
       } catch (error) {
@@ -430,12 +625,14 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
       }
     } else {
       if (freeBase < qty) continue;
+      if (gridAvailableBase < qty) continue;
       try {
         const order = await placeOrder({ symbol: grid.symbol, side, quantity: qty, price: levelPrice, type: 'LIMIT' });
         const orderId = Number((order as { orderId?: string | number } | undefined)?.orderId ?? 0);
         if (Number.isFinite(orderId) && orderId > 0) {
           nextOrdersByLevel[levelKey] = { orderId, side, price: levelPrice, quantity: qty, placedAt: now, lastSeenAt: now };
           freeBase -= qty;
+          gridAvailableBase = Math.max(0, gridAvailableBase - qty);
           placedThisTick += 1;
         }
       } catch (error) {
@@ -444,6 +641,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     }
   }
 
+  perf = revaluePerformance(perf, now, current);
   const updated: GridState = {
     ...grid,
     status: 'running',
@@ -451,6 +649,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     lastTickAt: now,
     lastError: undefined,
     ordersByLevel: nextOrdersByLevel,
+    performance: perf,
   };
   persistGrid(persisted, grid.symbol, updated);
   return updated;

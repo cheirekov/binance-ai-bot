@@ -174,6 +174,7 @@ export const config = {
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),
+  aiPolicyMaxGridAllocIncreasePctPerDay: numberFromEnv(process.env.AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY, 5),
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),
   aiPolicySweepCooldownMinutes: numberFromEnv(process.env.AI_POLICY_SWEEP_COOLDOWN_MINUTES, 180),

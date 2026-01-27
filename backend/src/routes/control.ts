@@ -3,8 +3,9 @@ import { z } from 'zod';
 
 import { get24hStats, getBalances, getFuturesPositions, placeOrder } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
-import { applyRuntimeConfigOverrides, config } from '../config.js';
+import { config } from '../config.js';
 import { logger } from '../logger.js';
+import { applyAiTuning } from '../services/aiTuning.js';
 import { startGrid, stopGrid } from '../services/gridTrader.js';
 import { getPersistedState, persistMeta } from '../services/persistence.js';
 import { sweepUnusedToHome } from '../services/sweepUnused.js';
@@ -139,26 +140,20 @@ export async function controlRoutes(fastify: FastifyInstance) {
 
     const now = Date.now();
     if (parseResult.data.dryRun) {
-      const wouldApply = applyRuntimeConfigOverrides({ ...tune }, { mutate: false });
-      return { ok: true, dryRun: true, at: now, wouldApply };
+      const res = applyAiTuning({ tune: { ...tune }, source: 'ai', reason: `ai-policy:${decision.action}`, dryRun: true });
+      if (!res.ok) {
+        reply.status(400);
+        return { error: res.error };
+      }
+      return { ok: true, dryRun: true, at: now, wouldApply: res.wouldApply, notes: res.notes };
     }
 
-    const applied = applyRuntimeConfigOverrides({ ...tune }, { mutate: true });
-    if (Object.keys(applied).length === 0) {
+    const res = applyAiTuning({ tune: { ...tune }, source: 'ai', reason: `ai-policy:${decision.action}` });
+    if (!res.ok || !res.applied) {
       reply.status(400);
-      return { error: 'AI tuning suggestion had no applicable changes (invalid or out of bounds).' };
+      return { error: res.ok ? 'AI tuning suggestion had no applicable changes.' : res.error };
     }
-
-    persistMeta(persisted, {
-      runtimeConfig: {
-        updatedAt: now,
-        source: 'ai',
-        reason: `ai-policy:${decision.action}`,
-        values: applied,
-      },
-    });
-
-    return { ok: true, at: now, applied };
+    return { ok: true, at: now, applied: res.applied, notes: res.notes };
   });
 
   fastify.post('/portfolio/panic-liquidate', async (request, reply) => {

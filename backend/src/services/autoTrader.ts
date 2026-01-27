@@ -10,11 +10,12 @@ import {
   placeOrder,
 } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
-import { applyRuntimeConfigOverrides, config } from '../config.js';
+import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { runAiPolicy } from './aiPolicy.js';
+import { applyAiTuning } from './aiTuning.js';
 import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
@@ -1623,17 +1624,13 @@ export const autoTradeTick = async (symbol?: string) => {
       if (config.aiPolicyTuningAutoApply && aiDecision.tune && Object.keys(aiDecision.tune).length > 0) {
         const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
         if (alreadyAppliedAt < aiDecision.at) {
-          const applied = applyRuntimeConfigOverrides({ ...aiDecision.tune }, { mutate: true });
-          if (Object.keys(applied).length > 0) {
-            persistMeta(persisted, {
-              runtimeConfig: {
-                updatedAt: Date.now(),
-                source: 'ai',
-                reason: `ai-policy:${aiDecision.action}`,
-                values: applied,
-              },
-            });
-            logger.info({ applied }, 'AI policy applied runtime tuning');
+          const res = applyAiTuning({ tune: { ...aiDecision.tune }, source: 'ai', reason: `ai-policy:${aiDecision.action}` });
+          if (res.ok) {
+            if (res.applied && Object.keys(res.applied).length > 0) {
+              logger.info({ applied: res.applied, notes: res.notes }, 'AI policy applied runtime tuning');
+            }
+          } else {
+            logger.warn({ error: res.error }, 'AI policy tuning apply failed');
           }
         }
       }

@@ -22,6 +22,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
    - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only** and only run on symbols quoted in `HOME_ASSET` (e.g. `BTCUSDC` if `HOME_ASSET=USDC`). Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC`.
    - AI policy (optional): set `AI_POLICY_MODE=advisory` (no trading) or `AI_POLICY_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
      - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.
+     - Grid allocation tuning via `GRID_MAX_ALLOC_PCT` is additionally clamped: `AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY` limits how much the AI can increase it per day (decreases are allowed).
    - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `OPENAI_BASE_URL` (for example: local `ollama`, `llama.cpp` server, or `vLLM`).
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.

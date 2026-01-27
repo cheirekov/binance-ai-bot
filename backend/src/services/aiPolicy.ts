@@ -168,6 +168,37 @@ const userPrompt = (payload: {
   homeAsset: string;
   portfolioEnabled: boolean;
   portfolioMaxPositions: number;
+  grid?: {
+    enabled: boolean;
+    maxAllocPct: number;
+    maxActiveGrids: number;
+    running: Array<{
+      symbol: string;
+      allocationHome: number;
+      orderNotionalHome: number;
+      lowerPrice: number;
+      upperPrice: number;
+      levels: number;
+      createdAt: number;
+      status: string;
+      pnlHome?: number;
+      pnlPct?: number;
+      feesHome?: number;
+      fillsBuy?: number;
+      fillsSell?: number;
+      breakouts?: number;
+      lastError?: string;
+    }>;
+    recentStopped: Array<{
+      symbol: string;
+      status: string;
+      updatedAt: number;
+      pnlHome?: number;
+      pnlPct?: number;
+      breakouts?: number;
+      lastError?: string;
+    }>;
+  };
   openPositions: ReturnType<typeof buildOpenPositions>;
   candidates: Awaited<ReturnType<typeof buildCandidates>>;
   newsSentiment: number;
@@ -227,11 +258,56 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
       }
     }
 
+    const grids = Object.values(persisted.grids ?? {});
+    const gridPayload =
+      config.tradeVenue === 'spot'
+        ? {
+            enabled: config.gridEnabled,
+            maxAllocPct: config.gridMaxAllocPct,
+            maxActiveGrids: config.gridMaxActiveGrids,
+            running: grids
+              .filter((g) => g?.status === 'running')
+              .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+              .slice(0, 5)
+              .map((g) => ({
+                symbol: g.symbol.toUpperCase(),
+                allocationHome: g.allocationHome ?? 0,
+                orderNotionalHome: g.orderNotionalHome ?? 0,
+                lowerPrice: g.lowerPrice ?? 0,
+                upperPrice: g.upperPrice ?? 0,
+                levels: g.levels ?? 0,
+                createdAt: g.createdAt ?? 0,
+                status: g.status,
+                pnlHome: g.performance?.pnlHome,
+                pnlPct: g.performance?.pnlPct,
+                feesHome: g.performance?.feesHome,
+                fillsBuy: g.performance?.fillsBuy,
+                fillsSell: g.performance?.fillsSell,
+                breakouts: g.performance?.breakouts,
+                lastError: g.lastError,
+              })),
+            recentStopped: grids
+              .filter((g) => g && g.status !== 'running')
+              .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+              .slice(0, 5)
+              .map((g) => ({
+                symbol: g.symbol.toUpperCase(),
+                status: g.status,
+                updatedAt: g.updatedAt ?? 0,
+                pnlHome: g.performance?.pnlHome,
+                pnlPct: g.performance?.pnlPct,
+                breakouts: g.performance?.breakouts,
+                lastError: g.lastError,
+              })),
+          }
+        : undefined;
+
     const payload = {
       venue: config.tradeVenue,
       homeAsset: config.homeAsset,
       portfolioEnabled: config.portfolioEnabled,
       portfolioMaxPositions: config.portfolioMaxPositions,
+      grid: gridPayload,
       openPositions,
       candidates,
       newsSentiment: news.sentiment,

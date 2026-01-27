@@ -58,6 +58,22 @@ export interface GridOrder {
   lastSeenAt?: number;
 }
 
+export interface GridPerformance {
+  startAt: number;
+  startValueHome: number;
+  lastAt: number;
+  lastValueHome: number;
+  pnlHome: number;
+  pnlPct: number;
+  baseVirtual: number;
+  quoteVirtual: number;
+  feesHome: number;
+  fillsBuy: number;
+  fillsSell: number;
+  lastFillAt?: number;
+  breakouts: number;
+}
+
 export interface GridState {
   symbol: string;
   status: GridStatus;
@@ -76,6 +92,7 @@ export interface GridState {
   lastTickAt?: number;
   lastError?: string;
   ordersByLevel: Record<string, GridOrder>;
+  performance?: GridPerformance;
 }
 
 export interface RiskSettings {
@@ -251,6 +268,11 @@ export interface PersistedPayload {
     aiSweeps?: {
       date: string;
       count: number;
+      lastAt?: number;
+    };
+    aiTuning?: {
+      date: string;
+      gridMaxAllocIncreasePct: number;
       lastAt?: number;
     };
   };
