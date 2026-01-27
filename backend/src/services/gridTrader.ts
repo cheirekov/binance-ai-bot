@@ -263,6 +263,11 @@ const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: 
   const missing = desiredBase - freeBase;
   const qty = floorToStep(Math.max(0, missing), info.stepSize);
   if (!Number.isFinite(qty) || qty <= 0) return { balances };
+  if (info.minQty && qty < info.minQty) return { balances };
+  if (info.minNotional && qty * Math.max(currentPrice, 0.00000001) < info.minNotional) {
+    // Close enough, but the top-up is below Binance minimums (avoid noisy retries).
+    return { balances };
+  }
 
   try {
     await placeOrder({ symbol: grid.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
