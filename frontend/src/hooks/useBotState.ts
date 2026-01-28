@@ -31,10 +31,18 @@ const mergeSymbols = (payload: StrategyResponse): string[] => {
   return [current, ...list];
 };
 
+const getHttpStatus = (err: unknown): number | undefined => {
+  if (typeof err !== 'object' || !err) return undefined;
+  if (!('response' in err)) return undefined;
+  const rec = err as { response?: { status?: number } };
+  return rec.response?.status;
+};
+
 const toErrorMessage = (err: unknown) => {
   if (typeof err === 'object' && err && 'response' in err) {
     const rec = err as { response?: { status?: number; data?: { error?: string } } };
     const status = rec.response?.status;
+    if (status === 429) return 'API rate-limited (429). UI will retry in ~10s.';
     const msg = rec.response?.data?.error ?? 'Request failed';
     return `API error${status ? ` ${status}` : ''}: ${msg}`;
   }
@@ -52,20 +60,35 @@ export const useBotState = (options?: { pollMs?: number }): BotState => {
   const lastSuccessAt = useMemo(() => (apiHealth.status === 'ok' ? apiHealth.lastSuccessAt : apiHealth.status === 'error' ? apiHealth.lastSuccessAt ?? null : null), [apiHealth]);
   const inFlight = useRef<Promise<void> | null>(null);
   const mounted = useRef(true);
+  const nextAllowedAt = useRef(0);
+  const rateLimitRetryTimeoutId = useRef<number | null>(null);
+
+  const dataRef = useRef<StrategyResponse | null>(null);
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
+
+  const symbolRef = useRef<string>(selectedSymbol);
+  useEffect(() => {
+    symbolRef.current = selectedSymbol;
+  }, [selectedSymbol]);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      if (rateLimitRetryTimeoutId.current !== null) window.clearTimeout(rateLimitRetryTimeoutId.current);
     };
   }, []);
 
   const load = useCallback(
     async (symbol?: string, mode: 'sync' | 'refresh' | 'autoPick' | 'poll' = 'sync') => {
       if (inFlight.current) return inFlight.current;
+      const now = Date.now();
+      if (now < nextAllowedAt.current) return;
       const task = (async () => {
-        const sym = symbol ?? selectedSymbol;
-        const shouldShowLoading = mode === 'sync' && !data;
+        const sym = symbol ?? symbolRef.current;
+        const shouldShowLoading = mode === 'sync' && !dataRef.current;
         if (shouldShowLoading) setLoading(true);
         try {
           const payload =
@@ -76,6 +99,11 @@ export const useBotState = (options?: { pollMs?: number }): BotState => {
                 : await fetchStrategy(sym || undefined);
 
           if (!mounted.current) return;
+          nextAllowedAt.current = 0;
+          if (rateLimitRetryTimeoutId.current !== null) {
+            window.clearTimeout(rateLimitRetryTimeoutId.current);
+            rateLimitRetryTimeoutId.current = null;
+          }
           setData(payload);
           if (payload.symbol) setSelectedSymbol(payload.symbol);
           const merged = mergeSymbols(payload);
@@ -85,6 +113,17 @@ export const useBotState = (options?: { pollMs?: number }): BotState => {
           setApiHealth({ status: 'ok', lastSuccessAt: now });
         } catch (err) {
           if (!mounted.current) return;
+          const status = getHttpStatus(err);
+          if (status === 429) {
+            const until = Date.now() + 10_000;
+            nextAllowedAt.current = Math.max(nextAllowedAt.current, until);
+            if (rateLimitRetryTimeoutId.current !== null) window.clearTimeout(rateLimitRetryTimeoutId.current);
+            rateLimitRetryTimeoutId.current = window.setTimeout(() => {
+              rateLimitRetryTimeoutId.current = null;
+              if (!mounted.current) return;
+              void loadRef.current(undefined, dataRef.current ? 'poll' : 'sync');
+            }, Math.max(0, nextAllowedAt.current - Date.now()));
+          }
           const msg = toErrorMessage(err);
           setError(msg);
           const now = Date.now();
@@ -101,8 +140,13 @@ export const useBotState = (options?: { pollMs?: number }): BotState => {
       inFlight.current = task;
       return task;
     },
-    [data, selectedSymbol],
+    [],
   );
+
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
 
   const sync = useCallback(async () => load(selectedSymbol, 'sync'), [load, selectedSymbol]);
   const refreshNow = useCallback(async () => load(selectedSymbol, 'refresh'), [load, selectedSymbol]);
@@ -113,16 +157,12 @@ export const useBotState = (options?: { pollMs?: number }): BotState => {
   }, [selectedSymbol]);
 
   useEffect(() => {
-    void load(selectedSymbol, 'sync');
+    if (!dataRef.current || (selectedSymbol && dataRef.current.symbol !== selectedSymbol)) {
+      void load(selectedSymbol, 'sync');
+    }
     const interval = window.setInterval(() => void load(selectedSymbol, 'poll'), pollMs);
     return () => window.clearInterval(interval);
   }, [load, pollMs, selectedSymbol]);
-
-  useEffect(() => {
-    if (!data?.symbol) return;
-    if (data.symbol === selectedSymbol) return;
-    void load(data.symbol, 'sync');
-  }, [data?.symbol, load, selectedSymbol]);
 
   const onSetSelectedSymbol = useCallback(
     (symbol: string) => {
