@@ -14,7 +14,7 @@ import {
   sweepUnused,
   triggerRefresh,
 } from './api';
-import { Balance, GridState, OrderRow, StrategyPlan, StrategyResponse } from './types';
+import { GridState, OrderRow, StrategyPlan, StrategyResponse } from './types';
 
 const formatCompactNumber = (value: number, options?: { maxDecimals?: number }) => {
   const maxDecimals = options?.maxDecimals ?? 8;
@@ -98,18 +98,6 @@ const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
     <p className="muted">Est. fees {plan.estimatedFees.toFixed(4)}</p>
   </div>
 );
-
-const BalanceRow = ({ balance }: { balance: Balance }) => {
-  const total = (balance.free ?? 0) + (balance.locked ?? 0);
-  return (
-    <div className="balance-row">
-      <span className="mono">{balance.asset}</span>
-      <span className="muted mono">
-        {formatCompactNumber(total)} total · {formatCompactNumber(balance.free ?? 0)} free / {formatCompactNumber(balance.locked ?? 0)} locked
-      </span>
-    </div>
-  );
-};
 
 function App() {
   const [data, setData] = useState<StrategyResponse | null>(null);
@@ -741,10 +729,26 @@ function App() {
               </div>
             </div>
             {filteredBalances.length ? (
-              <div className="balance-list">
-                {filteredBalances.map((balance) => (
-                  <BalanceRow key={balance.asset} balance={balance} />
-                ))}
+              <div className="table">
+                <div className="tr th tr-balances">
+                  <div>Asset</div>
+                  <div className="right">Total</div>
+                  <div className="right">Free</div>
+                  <div className="right">Locked</div>
+                </div>
+                {filteredBalances.map((balance) => {
+                  const asset = balance.asset.toUpperCase();
+                  const total = (balance.free ?? 0) + (balance.locked ?? 0);
+                  const isHome = data?.homeAsset?.toUpperCase() === asset;
+                  return (
+                    <div key={asset} className={isHome ? 'tr tr-balances active' : 'tr tr-balances'}>
+                      <div className={isHome ? 'mono positive' : 'mono'}>{asset}</div>
+                      <div className="right mono">{formatCompactNumber(total)}</div>
+                      <div className="right mono">{formatCompactNumber(balance.free ?? 0)}</div>
+                      <div className={balance.locked ? 'right mono negative' : 'right mono'}>{formatCompactNumber(balance.locked ?? 0)}</div>
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <p className="muted">No balances to show (check keys, filters, and refresh).</p>
