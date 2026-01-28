@@ -601,40 +601,6 @@ function App() {
 
   return (
     <div className="page">
-      <div className="sticky-controls">
-        <div className="sticky-controls-row">
-          <div className="actions">
-            <button className="btn primary" onClick={onRefresh} disabled={refreshing}>
-              {refreshing ? 'Refreshing...' : 'Refresh now'}
-            </button>
-            <button className="btn ghost" onClick={() => void load(selectedSymbol)} disabled={loading}>
-              Sync status
-            </button>
-            <button className="btn soft" onClick={onAutoSelect} disabled={refreshing}>
-              Auto-pick best
-            </button>
-          </div>
-          <div className="actions">
-            <label className="label" htmlFor="symbol-select-sticky">
-              Symbol
-            </label>
-            <select
-              id="symbol-select-sticky"
-              className="select"
-              value={selectedSymbol}
-              onChange={(e) => setSelectedSymbol(e.target.value)}
-            >
-              {(availableSymbols.length ? availableSymbols : [selectedSymbol]).map((sym) => (
-                <option key={sym} value={sym}>
-                  {sym}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        {tradeMessage && <p className="muted">{tradeMessage}</p>}
-        {error && <p className="error">{error}</p>}
-      </div>
       <div className="hero">
         <div>
           <p className="eyebrow">Binance AI Bot</p>
@@ -671,165 +637,8 @@ function App() {
               ))}
             </select>
           </div>
-        </div>
-        <div className="status-card">
-          <p className="label">Bot status</p>
-          <h2>{data?.status ?? 'Loading...'}</h2>
-          <p className="muted">
-            {data?.lastUpdated
-              ? `Updated ${new Date(data.lastUpdated).toLocaleTimeString()}`
-              : 'Waiting for first tick'}
-          </p>
-          {(data?.symbol ?? selectedSymbol) && (
-            <p className="muted">
-              Viewing symbol: <strong>{data?.symbol ?? selectedSymbol}</strong>
-            </p>
-          )}
-          {(data?.autoTradeEnabled !== undefined || data?.tradingEnabled !== undefined) && (
-            <p className="muted">
-              Live trading: {data?.tradingEnabled ? 'on' : 'off'} · Auto-trade: {data?.autoTradeEnabled ? 'on' : 'off'}
-            </p>
-          )}
-          {data?.tradeVenue && (
-            <p className="muted">
-              Venue: {data.tradeVenue}
-              {data.tradeVenue === 'futures'
-                ? ` · Futures: ${data.futuresEnabled ? 'on' : 'off'}${data.futuresLeverage ? ` · Leverage: ${data.futuresLeverage}x` : ''}`
-                : ''}
-            </p>
-          )}
-          {(data?.portfolioEnabled !== undefined || data?.conversionEnabled !== undefined) && (
-            <p className="muted">
-              Portfolio: {data?.portfolioEnabled ? `on (${data?.portfolioMaxAllocPct ?? '—'}% / ${data?.portfolioMaxPositions ?? '—'} pos)` : 'off'}
-              {data?.conversionEnabled !== undefined
-                ? ` · Conversions: ${
-                    data.tradeVenue === 'futures' ? 'n/a (futures)' : data.conversionEnabled ? 'on' : 'off'
-                  }`
-                : ''}
-              {data?.homeAsset ? ` · Home: ${data.homeAsset}` : ''}
-            </p>
-          )}
-          {data?.gridEnabled !== undefined && (
-            <p className="muted">
-              Grid: {data.gridEnabled ? 'on' : 'off'}
-              {data.gridEnabled ? ` (${data.gridMaxAllocPct ?? '—'}% / ${data.gridMaxActiveGrids ?? '—'} grids)` : ''}
-              {data?.grids
-                ? (() => {
-                    const running = Object.values(data.grids).filter((g) => g.status === 'running');
-                    return running.length ? ` · Active: ${running.map((g) => g.symbol).join(', ')}` : '';
-                  })()
-                : ''}
-            </p>
-          )}
-          {data?.aiPolicyMode !== undefined && (
-            <p className="muted">
-              AI policy: {data.aiPolicyMode}
-              {data.aiPolicy?.lastDecision
-                ? ` · ${data.aiPolicy.lastDecision.action}${
-                    data.aiPolicy.lastDecision.symbol ? ` ${data.aiPolicy.lastDecision.symbol}` : ''
-                  }${data.aiPolicy.lastDecision.horizon ? ` (${data.aiPolicy.lastDecision.horizon})` : ''} · ${new Date(
-                    data.aiPolicy.lastDecision.at,
-                  ).toLocaleTimeString()} · ${(data.aiPolicy.lastDecision.confidence * 100).toFixed(0)}%`
-                : ''}
-            </p>
-          )}
-          {data?.aiPolicy?.lastDecision?.reason ? <p className="muted">AI: {data.aiPolicy.lastDecision.reason}</p> : null}
-          {hasAiTune ? <p className="muted">AI tuning suggested: {tuneSummary}</p> : null}
-          {aiWantsSweep ? (
-            <p className="muted">
-              AI suggests: sweep unused → {data?.homeAsset ?? 'HOME'} (you can run it via the button below)
-            </p>
-          ) : null}
-          {data?.runtimeConfig?.values && runtimeSummary ? (
-            <p className="muted">
-              Runtime overrides: {runtimeSummary}
-              {data.runtimeConfig.updatedAt ? ` · updated ${new Date(data.runtimeConfig.updatedAt).toLocaleTimeString()}` : ''}
-              {data.runtimeConfig.source ? ` · ${data.runtimeConfig.source}` : ''}
-            </p>
-          ) : null}
-          {data?.equity && (
-            <p className="muted">
-              Equity {data.equity.lastHome.toLocaleString(undefined, { maximumFractionDigits: 2 })} {data.equity.homeAsset} · PnL{' '}
-              {(data.equity.pnlHome >= 0 ? '+' : '') + data.equity.pnlHome.toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
-              ({(data.equity.pnlPct >= 0 ? '+' : '') + data.equity.pnlPct.toFixed(2)}%) · since{' '}
-              {new Date(data.equity.startAt).toLocaleTimeString()}
-            </p>
-          )}
-          {data?.equity?.missingAssets?.length ? (
-            <p className="muted">Unpriced assets: {data.equity.missingAssets.join(', ')}</p>
-          ) : null}
-          {data?.activeSymbol && (
-            <p className="muted">
-              Bot active symbol: <strong>{data.activeSymbol}</strong>
-              {data.autoSelectUpdatedAt ? ` · picked ${new Date(data.autoSelectUpdatedAt).toLocaleTimeString()}` : ''}
-              {data.symbol && data.activeSymbol.toUpperCase() !== data.symbol.toUpperCase() ? ` · viewing ${data.symbol}` : ''}
-            </p>
-          )}
-          {openPositions.length > 0 && (
-            <p className="muted">
-              Open positions:{' '}
-              {openPositions
-                .map((p) => `${p.symbol.toUpperCase()} (${p.side === 'SELL' ? 'short' : 'long'}, ${p.horizon} horizon)`)
-                .join(', ')}
-            </p>
-          )}
-          {data?.emergencyStop !== undefined && (
-            <p className="muted">
-              Emergency stop: {data.emergencyStop ? 'on' : 'off'}
-              {data.emergencyStopAt ? ` · ${new Date(data.emergencyStopAt).toLocaleTimeString()}` : ''}
-              {data.emergencyStopReason ? ` · ${data.emergencyStopReason}` : ''}
-            </p>
-          )}
-          {data?.lastAutoTrade && (
-            <p className="muted">
-              Auto-trade: {data.lastAutoTrade.action}
-              {data.lastAutoTrade.horizon ? ` (${data.lastAutoTrade.horizon})` : ''} ·{' '}
-              {new Date(data.lastAutoTrade.at).toLocaleTimeString()}
-              {data.lastAutoTrade.reason ? ` · ${data.lastAutoTrade.reason}` : ''}
-            </p>
-          )}
-          {riskFlags.length > 0 && (
-            <div className="risk">
-              <p className="label">Risk flags</p>
-              <ul>
-                {riskFlags.map((flag) => (
-                  <li key={flag}>{flag}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          <div className="status-actions">
-            <button className="btn soft" onClick={() => simulateTrade('BUY')} disabled={data?.tradeHalted}>
-              Sim buy {tradeQuantity || '—'}
-            </button>
-            <button className="btn soft" onClick={() => simulateTrade('SELL')} disabled={data?.tradeHalted}>
-              Sim sell {tradeQuantity || '—'}
-            </button>
-            {hasAiTune && (
-              <button className="btn soft" onClick={onApplyAiTuning} disabled={tuningRunning || tuneAlreadyApplied}>
-                {tuningRunning ? 'Applying AI tuning…' : tuneAlreadyApplied ? 'AI tuning applied' : 'Apply AI tuning'}
-              </button>
-            )}
-            <button className="btn soft" onClick={onSweepUnused} disabled={sweepRunning || data?.tradeVenue === 'futures'}>
-              {sweepRunning ? 'Sweeping…' : `Sweep unused → ${data?.homeAsset ?? 'HOME'}`}
-            </button>
-            <button className="btn danger" onClick={onPanic} disabled={panicRunning}>
-              {panicRunning
-                ? 'Running…'
-                : data?.tradeVenue === 'futures'
-                  ? 'Panic: close futures'
-                  : `Panic: liquidate to ${data?.homeAsset ?? 'HOME'}`}
-            </button>
-            <button className="btn soft" onClick={onStartGrid} disabled={gridRunning || data?.tradeVenue === 'futures'}>
-              Start grid
-            </button>
-            <button className="btn soft" onClick={onStopGrid} disabled={gridRunning || data?.tradeVenue === 'futures'}>
-              Stop grid
-            </button>
-            <button className="btn ghost" onClick={toggleEmergencyStop} disabled={refreshing}>
-              {data?.emergencyStop ? 'Resume auto-trade' : 'Emergency stop'}
-            </button>
-          </div>
+          {tradeMessage && <p className="muted">{tradeMessage}</p>}
+          {error && <p className="error">{error}</p>}
         </div>
       </div>
 
@@ -1332,6 +1141,156 @@ function App() {
           )}
         </div>
       ) : null}
+
+      <div className="panel-grid">
+        <div className="status-card">
+          <p className="label">Bot status</p>
+          <h2>{data?.status ?? 'Loading...'}</h2>
+          <p className="muted">
+            {data?.lastUpdated ? `Updated ${new Date(data.lastUpdated).toLocaleTimeString()}` : 'Waiting for first tick'}
+          </p>
+          {(data?.symbol ?? selectedSymbol) && (
+            <p className="muted">
+              Viewing symbol: <strong>{data?.symbol ?? selectedSymbol}</strong>
+            </p>
+          )}
+          {(data?.autoTradeEnabled !== undefined || data?.tradingEnabled !== undefined) && (
+            <p className="muted">
+              Live trading: {data?.tradingEnabled ? 'on' : 'off'} · Auto-trade: {data?.autoTradeEnabled ? 'on' : 'off'}
+            </p>
+          )}
+          {data?.tradeVenue && (
+            <p className="muted">
+              Venue: {data.tradeVenue}
+              {data.tradeVenue === 'futures'
+                ? ` · Futures: ${data.futuresEnabled ? 'on' : 'off'}${data.futuresLeverage ? ` · Leverage: ${data.futuresLeverage}x` : ''}`
+                : ''}
+            </p>
+          )}
+          {(data?.portfolioEnabled !== undefined || data?.conversionEnabled !== undefined) && (
+            <p className="muted">
+              Portfolio: {data?.portfolioEnabled ? `on (${data?.portfolioMaxAllocPct ?? '—'}% / ${data?.portfolioMaxPositions ?? '—'} pos)` : 'off'}
+              {data?.conversionEnabled !== undefined
+                ? ` · Conversions: ${
+                    data.tradeVenue === 'futures' ? 'n/a (futures)' : data.conversionEnabled ? 'on' : 'off'
+                  }`
+                : ''}
+              {data?.homeAsset ? ` · Home: ${data.homeAsset}` : ''}
+            </p>
+          )}
+          {data?.gridEnabled !== undefined && (
+            <p className="muted">
+              Grid: {data.gridEnabled ? 'on' : 'off'}
+              {data.gridEnabled ? ` (${data.gridMaxAllocPct ?? '—'}% / ${data.gridMaxActiveGrids ?? '—'} grids)` : ''}
+              {data?.grids
+                ? (() => {
+                    const running = Object.values(data.grids).filter((g) => g.status === 'running');
+                    return running.length ? ` · Active: ${running.map((g) => g.symbol).join(', ')}` : '';
+                  })()
+                : ''}
+            </p>
+          )}
+          {data?.aiPolicyMode !== undefined && (
+            <p className="muted">
+              AI policy: {data.aiPolicyMode}
+              {data.aiPolicy?.lastDecision
+                ? ` · ${data.aiPolicy.lastDecision.action}${
+                    data.aiPolicy.lastDecision.symbol ? ` ${data.aiPolicy.lastDecision.symbol}` : ''
+                  }${data.aiPolicy.lastDecision.horizon ? ` (${data.aiPolicy.lastDecision.horizon})` : ''} · ${new Date(
+                    data.aiPolicy.lastDecision.at,
+                  ).toLocaleTimeString()} · ${(data.aiPolicy.lastDecision.confidence * 100).toFixed(0)}%`
+                : ''}
+            </p>
+          )}
+          {data?.aiPolicy?.lastDecision?.reason ? <p className="muted">AI: {data.aiPolicy.lastDecision.reason}</p> : null}
+          {hasAiTune ? <p className="muted">AI tuning suggested: {tuneSummary}</p> : null}
+          {aiWantsSweep ? (
+            <p className="muted">AI suggests: sweep unused → {data?.homeAsset ?? 'HOME'} (you can run it via the button below)</p>
+          ) : null}
+          {data?.runtimeConfig?.values && runtimeSummary ? (
+            <p className="muted">
+              Runtime overrides: {runtimeSummary}
+              {data.runtimeConfig.updatedAt ? ` · updated ${new Date(data.runtimeConfig.updatedAt).toLocaleTimeString()}` : ''}
+              {data.runtimeConfig.source ? ` · ${data.runtimeConfig.source}` : ''}
+            </p>
+          ) : null}
+          {data?.equity && (
+            <p className="muted">
+              Equity {data.equity.lastHome.toLocaleString(undefined, { maximumFractionDigits: 2 })} {data.equity.homeAsset} · PnL{' '}
+              {(data.equity.pnlHome >= 0 ? '+' : '') + data.equity.pnlHome.toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
+              ({(data.equity.pnlPct >= 0 ? '+' : '') + data.equity.pnlPct.toFixed(2)}%) · since {new Date(data.equity.startAt).toLocaleTimeString()}
+            </p>
+          )}
+          {data?.equity?.missingAssets?.length ? <p className="muted">Unpriced assets: {data.equity.missingAssets.join(', ')}</p> : null}
+          {data?.activeSymbol && (
+            <p className="muted">
+              Bot active symbol: <strong>{data.activeSymbol}</strong>
+              {data.autoSelectUpdatedAt ? ` · picked ${new Date(data.autoSelectUpdatedAt).toLocaleTimeString()}` : ''}
+              {data.symbol && data.activeSymbol.toUpperCase() !== data.symbol.toUpperCase() ? ` · viewing ${data.symbol}` : ''}
+            </p>
+          )}
+          {openPositions.length > 0 && (
+            <p className="muted">
+              Open positions:{' '}
+              {openPositions
+                .map((p) => `${p.symbol.toUpperCase()} (${p.side === 'SELL' ? 'short' : 'long'}, ${p.horizon} horizon)`)
+                .join(', ')}
+            </p>
+          )}
+          {data?.emergencyStop !== undefined && (
+            <p className="muted">
+              Emergency stop: {data.emergencyStop ? 'on' : 'off'}
+              {data.emergencyStopAt ? ` · ${new Date(data.emergencyStopAt).toLocaleTimeString()}` : ''}
+              {data.emergencyStopReason ? ` · ${data.emergencyStopReason}` : ''}
+            </p>
+          )}
+          {data?.lastAutoTrade && (
+            <p className="muted">
+              Auto-trade: {data.lastAutoTrade.action}
+              {data.lastAutoTrade.horizon ? ` (${data.lastAutoTrade.horizon})` : ''} · {new Date(data.lastAutoTrade.at).toLocaleTimeString()}
+              {data.lastAutoTrade.reason ? ` · ${data.lastAutoTrade.reason}` : ''}
+            </p>
+          )}
+          {riskFlags.length > 0 && (
+            <div className="risk">
+              <p className="label">Risk flags</p>
+              <ul>
+                {riskFlags.map((flag) => (
+                  <li key={flag}>{flag}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="status-actions">
+            <button className="btn soft" onClick={() => simulateTrade('BUY')} disabled={data?.tradeHalted}>
+              Sim buy {tradeQuantity || '—'}
+            </button>
+            <button className="btn soft" onClick={() => simulateTrade('SELL')} disabled={data?.tradeHalted}>
+              Sim sell {tradeQuantity || '—'}
+            </button>
+            {hasAiTune && (
+              <button className="btn soft" onClick={onApplyAiTuning} disabled={tuningRunning || tuneAlreadyApplied}>
+                {tuningRunning ? 'Applying AI tuning…' : tuneAlreadyApplied ? 'AI tuning applied' : 'Apply AI tuning'}
+              </button>
+            )}
+            <button className="btn soft" onClick={onSweepUnused} disabled={sweepRunning || data?.tradeVenue === 'futures'}>
+              {sweepRunning ? 'Sweeping…' : `Sweep unused → ${data?.homeAsset ?? 'HOME'}`}
+            </button>
+            <button className="btn danger" onClick={onPanic} disabled={panicRunning}>
+              {panicRunning ? 'Running…' : data?.tradeVenue === 'futures' ? 'Panic: close futures' : `Panic: liquidate to ${data?.homeAsset ?? 'HOME'}`}
+            </button>
+            <button className="btn soft" onClick={onStartGrid} disabled={gridRunning || data?.tradeVenue === 'futures'}>
+              Start grid
+            </button>
+            <button className="btn soft" onClick={onStopGrid} disabled={gridRunning || data?.tradeVenue === 'futures'}>
+              Stop grid
+            </button>
+            <button className="btn ghost" onClick={toggleEmergencyStop} disabled={refreshing}>
+              {data?.emergencyStop ? 'Resume auto-trade' : 'Emergency stop'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
