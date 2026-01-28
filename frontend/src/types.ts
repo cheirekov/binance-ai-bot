@@ -285,3 +285,16 @@ export interface OrderHistoryResponse {
   symbol: string;
   orders: OrderRow[];
 }
+
+export interface PerformanceStatsResponse {
+  enabled: boolean;
+  path?: string;
+  totalTrades: number;
+  winRate: number | null;
+  avgWin: number | null;
+  avgLoss: number | null;
+  maxDrawdown: number | null;
+  totalFees: number;
+  netPnlByDay: Array<{ day: string; netPnlHome: number; feesHome: number }>;
+  lastErrorAt?: number | null;
+}

@@ -71,6 +71,11 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - Signals are deterministic by default (EMA/RSI/ATR/ADX/Bollinger). OpenAI only contributes optional notes and policy suggestions; risk caps and exchange rules remain authoritative.
 - Live trading is **off by default**. Enable only after testing; consider using Binance testnet or a sub-account with tight limits.
 - Frontend shows the current active symbol, the top candidates from the scanner, and the last auto-trade decision/reason.
+- UI safety highlights:
+  - Sticky top bar shows a **red** “LIVE TRADING ENABLED” banner whenever `TRADING_ENABLED=true`, plus an **orange** halt banner when `emergencyStop=true` or `tradeHalted=true`.
+  - Manual BUY/SELL is hidden behind **Advanced mode** (Status page). Advanced mode auto-disables after 10 minutes of inactivity.
+  - When LIVE trading is enabled, manual orders require typed confirmation: `LIVE BUY <SYMBOL>` / `LIVE SELL <SYMBOL>`.
+  - Mobile uses a sticky bottom navigation (Home/Portfolio/Orders/Strategy/Status); desktop uses top tabs.
 - `MIN_QUOTE_VOLUME` is enforced in `HOME_ASSET` terms (BTC/ETH quote volumes are converted using their `*HOME_ASSET` market).
 - `DAILY_LOSS_CAP_PCT` enables emergency stop when equity drawdown exceeds the threshold (PnL baseline resets daily).
 - News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages). Many sites (including Binance news pages) serve HTML and/or block server-side fetches.

@@ -1,6 +1,8 @@
 node_modules
 dist
 coverage
+.vite
+*_root_owned_backup
 *.log
 *.logs
 .DS_Store
