@@ -601,6 +601,40 @@ function App() {
 
   return (
     <div className="page">
+      <div className="sticky-controls">
+        <div className="sticky-controls-row">
+          <div className="actions">
+            <button className="btn primary" onClick={onRefresh} disabled={refreshing}>
+              {refreshing ? 'Refreshing...' : 'Refresh now'}
+            </button>
+            <button className="btn ghost" onClick={() => void load(selectedSymbol)} disabled={loading}>
+              Sync status
+            </button>
+            <button className="btn soft" onClick={onAutoSelect} disabled={refreshing}>
+              Auto-pick best
+            </button>
+          </div>
+          <div className="actions">
+            <label className="label" htmlFor="symbol-select-sticky">
+              Symbol
+            </label>
+            <select
+              id="symbol-select-sticky"
+              className="select"
+              value={selectedSymbol}
+              onChange={(e) => setSelectedSymbol(e.target.value)}
+            >
+              {(availableSymbols.length ? availableSymbols : [selectedSymbol]).map((sym) => (
+                <option key={sym} value={sym}>
+                  {sym}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        {tradeMessage && <p className="muted">{tradeMessage}</p>}
+        {error && <p className="error">{error}</p>}
+      </div>
       <div className="hero">
         <div>
           <p className="eyebrow">Binance AI Bot</p>
@@ -637,8 +671,6 @@ function App() {
               ))}
             </select>
           </div>
-          {tradeMessage && <p className="muted">{tradeMessage}</p>}
-          {error && <p className="error">{error}</p>}
         </div>
         <div className="status-card">
           <p className="label">Bot status</p>

@@ -22,9 +22,13 @@ body {
 }
 
 .page {
-  max-width: 1200px;
+  max-width: 1400px;
   margin: 0 auto;
   padding: 40px 22px 80px;
+}
+
+.sticky-controls {
+  display: none;
 }
 
 .hero {
@@ -257,6 +261,7 @@ h3 {
   gap: 8px;
   overflow-x: auto;
   padding-bottom: 6px;
+  width: 100%;
 }
 
 .tr {
@@ -270,6 +275,7 @@ h3 {
   background: rgba(255, 255, 255, 0.03);
   text-align: left;
   color: inherit;
+  width: 100%;
 }
 
 .tr > div {
@@ -450,5 +456,38 @@ h3 {
 @media (max-width: 900px) {
   .hero {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 901px) {
+  .sticky-controls {
+    display: block;
+    position: sticky;
+    top: 18px;
+    z-index: 50;
+    background: rgba(5, 8, 20, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 18px;
+    padding: 14px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.35);
+    margin-bottom: 18px;
+  }
+
+  .sticky-controls-row {
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .hero .actions {
+    display: none;
+  }
+
+  .status-card {
+    max-height: calc(100vh - 160px);
+    overflow: auto;
   }
 }
