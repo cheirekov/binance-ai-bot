@@ -41,6 +41,24 @@ const formatPrice = (value: number | undefined, quoteAsset: string | undefined, 
   return `${value.toFixed(digits)} ${qa ?? ''}`.trim();
 };
 
+const formatOrderType = (type: string) => {
+  const t = (type ?? '').toUpperCase();
+  if (!t) return '—';
+  const map: Record<string, string> = {
+    LIMIT: 'LIMIT',
+    MARKET: 'MARKET',
+    LIMIT_MAKER: 'MAKER',
+    STOP_LOSS_LIMIT: 'SL-LIMIT',
+    STOP_LOSS: 'SL',
+    TAKE_PROFIT_LIMIT: 'TP-LIMIT',
+    TAKE_PROFIT: 'TP',
+    STOP_MARKET: 'STOP-MKT',
+    TAKE_PROFIT_MARKET: 'TP-MKT',
+    TRAILING_STOP_MARKET: 'TRAIL',
+  };
+  return map[t] ?? t.replaceAll('_', '-');
+};
+
 const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
   <div className="card">
     <div className="card-header">
@@ -1122,7 +1140,7 @@ function App() {
                           onClick={() => setExpandedOrderId(isExpanded ? null : o.orderId)}
                         >
                           <div className="mono">{o.symbol}</div>
-                          <div className="mono">{o.type}</div>
+                          <div className="mono">{formatOrderType(o.type)}</div>
                           <div className={o.side === 'SELL' ? 'negative' : 'positive'}>{o.side}</div>
                           <div className="right mono">{o.price > 0 ? formatCompactNumber(o.price) : '—'}</div>
                           <div className="right mono">{formatCompactNumber(o.origQty)}</div>
@@ -1196,7 +1214,7 @@ function App() {
                       {isExpanded ? (
                         <div className="order-expand">
                           <div className="muted">
-                            Type <span className="mono">{o.type}</span> · OrderId <span className="mono">{o.orderId}</span>
+                            Type <span className="mono">{formatOrderType(o.type)}</span> · OrderId <span className="mono">{o.orderId}</span>
                             {o.stopPrice ? ` · Stop ${formatCompactNumber(o.stopPrice)}` : ''}{' '}
                             {o.timeInForce ? ` · TIF ${o.timeInForce}` : ''}
                           </div>
