@@ -444,4 +444,12 @@ h3 {
   .hero {
     grid-template-columns: 1fr;
   }
+
+  .panel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .strategies {
+    grid-template-columns: 1fr;
+  }
 }
