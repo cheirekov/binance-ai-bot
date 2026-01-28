@@ -227,6 +227,39 @@ const signedFuturesRequest = async <T>(
   return (json as T) ?? ({} as T);
 };
 
+const signedSpotRequest = async <T>(
+  method: 'GET' | 'POST' | 'DELETE',
+  path: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+): Promise<T> => {
+  if (!config.binanceApiKey || !config.binanceApiSecret) {
+    throw new Error('Missing BINANCE_API_KEY/BINANCE_API_SECRET');
+  }
+  const qs = buildSignedQuery(params);
+  const url = `${config.binanceBaseUrl}${path}?${qs}`;
+  const res = await fetch(url, {
+    method,
+    headers: {
+      'X-MBX-APIKEY': config.binanceApiKey,
+    },
+  });
+  const text = await res.text();
+  const json = (() => {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return null;
+    }
+  })();
+  if (!res.ok) {
+    const errObj = (json ?? {}) as { code?: number; msg?: string };
+    const msg = errObj?.msg ?? text ?? `HTTP ${res.status}`;
+    const code = errObj?.code !== undefined ? ` ${errObj.code}` : '';
+    throw new Error(`Binance spot error${code}: ${msg}`);
+  }
+  return (json as T) ?? ({} as T);
+};
+
 const getFuturesAccount = async (): Promise<FuturesAccount> => {
   const now = Date.now();
   if (futuresAccountCache && now - futuresAccountCache.fetchedAt < 5_000) return futuresAccountCache.data;
@@ -380,7 +413,12 @@ export const cancelOcoOrder = async (symbol: string, orderListId: number) => {
 
 export const getOpenOrders = async (symbol?: string): Promise<unknown[]> => {
   if (isFuturesVenue()) {
-    throw new Error('Open orders (spot) not supported in futures mode');
+    const data = await signedFuturesRequest<unknown[]>(
+      'GET',
+      '/fapi/v1/openOrders',
+      symbol ? { symbol: symbol.toUpperCase() } : {},
+    );
+    return Array.isArray(data) ? data : [];
   }
   const { data } = await client.openOrders(symbol ? { symbol } : {});
   return Array.isArray(data) ? (data as unknown[]) : [];
@@ -392,6 +430,17 @@ export const getOrder = async (symbol: string, orderId: number): Promise<unknown
   }
   const { data } = await client.getOrder(symbol, { orderId });
   return data;
+};
+
+export const getOrderHistory = async (symbol: string, limit = 50): Promise<unknown[]> => {
+  const upper = symbol.toUpperCase();
+  const capped = Math.max(1, Math.min(200, limit));
+  if (isFuturesVenue()) {
+    const data = await signedFuturesRequest<unknown[]>('GET', '/fapi/v1/allOrders', { symbol: upper, limit: capped });
+    return Array.isArray(data) ? data : [];
+  }
+  const data = await signedSpotRequest<unknown[]>('GET', '/api/v3/allOrders', { symbol: upper, limit: capped });
+  return Array.isArray(data) ? data : [];
 };
 
 export const cancelOrder = async (symbol: string, orderId: number): Promise<unknown> => {

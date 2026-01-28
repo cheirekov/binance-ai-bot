@@ -7,6 +7,7 @@ import { logger } from './logger.js';
 import { backtestRoutes } from './routes/backtest.js';
 import { controlRoutes } from './routes/control.js';
 import { healthRoutes } from './routes/health.js';
+import { ordersRoutes } from './routes/orders.js';
 import { strategyRoutes } from './routes/strategy.js';
 import { startScheduler } from './services/scheduler.js';
 
@@ -38,6 +39,7 @@ const bootstrap = async () => {
   await fastify.register(backtestRoutes);
   await fastify.register(controlRoutes);
   await fastify.register(strategyRoutes);
+  await fastify.register(ordersRoutes);
 
   startScheduler();
 

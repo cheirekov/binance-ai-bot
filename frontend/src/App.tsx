@@ -4,6 +4,8 @@ import {
   applyAiTuning,
   autoSelectSymbol,
   executeTrade,
+  fetchOpenOrders,
+  fetchOrderHistory,
   fetchStrategy,
   panicLiquidate,
   setEmergencyStop,
@@ -12,7 +14,7 @@ import {
   sweepUnused,
   triggerRefresh,
 } from './api';
-import { Balance, GridState, StrategyPlan, StrategyResponse } from './types';
+import { Balance, GridState, OrderRow, StrategyPlan, StrategyResponse } from './types';
 
 const formatCompactNumber = (value: number, options?: { maxDecimals?: number }) => {
   const maxDecimals = options?.maxDecimals ?? 8;
@@ -100,6 +102,13 @@ function App() {
   const [balancesView, setBalancesView] = useState<'relevant' | 'all'>(() => (localStorage.getItem('balancesView') as 'relevant' | 'all') ?? 'relevant');
   const [balanceQuery, setBalanceQuery] = useState('');
   const [showDustBalances, setShowDustBalances] = useState(() => (localStorage.getItem('showDustBalances') ?? 'false') === 'true');
+  const [ordersScope, setOrdersScope] = useState<'tracked' | 'viewing'>(() => (localStorage.getItem('ordersScope') as 'tracked' | 'viewing') ?? 'tracked');
+  const [ordersView, setOrdersView] = useState<'open' | 'history'>(() => (localStorage.getItem('ordersView') as 'open' | 'history') ?? 'open');
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
+  const [openOrders, setOpenOrders] = useState<OrderRow[]>([]);
+  const [orderHistory, setOrderHistory] = useState<OrderRow[]>([]);
+  const [expandedOrderId, setExpandedOrderId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [panicRunning, setPanicRunning] = useState(false);
@@ -157,6 +166,14 @@ function App() {
   useEffect(() => {
     localStorage.setItem('showDustBalances', String(showDustBalances));
   }, [showDustBalances]);
+
+  useEffect(() => {
+    localStorage.setItem('ordersScope', ordersScope);
+  }, [ordersScope]);
+
+  useEffect(() => {
+    localStorage.setItem('ordersView', ordersView);
+  }, [ordersView]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -503,6 +520,67 @@ function App() {
     }
   }, [modeHint]);
 
+  const trackedSymbols = useMemo(() => {
+    const set = new Set<string>();
+    if (data?.activeSymbol) set.add(data.activeSymbol.toUpperCase());
+    for (const p of Object.values(data?.positions ?? {})) {
+      if (!p?.symbol) continue;
+      if (data?.tradeVenue && p.venue && p.venue !== data.tradeVenue) continue;
+      set.add(p.symbol.toUpperCase());
+    }
+    for (const g of Object.values(data?.grids ?? {})) {
+      if (!g) continue;
+      if (g.status !== 'running') continue;
+      set.add(g.symbol.toUpperCase());
+    }
+    return Array.from(set).slice(0, 12);
+  }, [data?.activeSymbol, data?.grids, data?.positions, data?.tradeVenue]);
+
+  const loadOrders = useCallback(async () => {
+    if (!data) return;
+    setOrdersLoading(true);
+    setOrdersError(null);
+    try {
+      if (ordersView === 'open') {
+        const res = await fetchOpenOrders(
+          ordersScope === 'viewing'
+            ? { symbol: selectedSymbol.toUpperCase() }
+            : { symbols: trackedSymbols.length ? trackedSymbols : undefined },
+        );
+        if (!res.ok) {
+          setOrdersError('Failed to load open orders.');
+        } else {
+          setOpenOrders(res.openOrders ?? []);
+        }
+      } else {
+        const sym = selectedSymbol.toUpperCase();
+        const res = await fetchOrderHistory({ symbol: sym, limit: 80 });
+        if (!res.ok) {
+          setOrdersError('Failed to load order history.');
+        } else {
+          setOrderHistory(res.orders ?? []);
+        }
+      }
+    } catch (err) {
+      const message =
+        typeof err === 'object' && err && 'response' in err
+          ? `Orders error ${(err as { response?: { status?: number; data?: { error?: string } } }).response?.status ?? ''}: ${
+              (err as { response?: { data?: { error?: string } } }).response?.data?.error ?? 'Request failed'
+            }`
+          : 'Failed to load orders. Check API and logs.';
+      setOrdersError(message);
+    } finally {
+      setOrdersLoading(false);
+    }
+  }, [data, ordersScope, ordersView, selectedSymbol, trackedSymbols]);
+
+  useEffect(() => {
+    if (activeTab !== 'orders') return;
+    void loadOrders();
+    const interval = setInterval(() => void loadOrders(), 20_000);
+    return () => clearInterval(interval);
+  }, [activeTab, loadOrders]);
+
   return (
     <div className="page">
       <div className="hero">
@@ -712,6 +790,10 @@ function App() {
         <button className={activeTab === 'positions' ? 'tab active' : 'tab'} onClick={() => setActiveTab('positions')}>
           Positions
           {openPositionRows.length ? <span className="tab-badge">{openPositionRows.length}</span> : null}
+        </button>
+        <button className={activeTab === 'orders' ? 'tab active' : 'tab'} onClick={() => setActiveTab('orders')}>
+          Orders
+          {openOrders.length && activeTab !== 'orders' ? <span className="tab-badge">{openOrders.length}</span> : null}
         </button>
         <button
           className={activeTab === 'grid' ? 'tab active' : 'tab'}
@@ -980,6 +1062,169 @@ function App() {
                 </ul>
               </details>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === 'orders' ? (
+        <div className="panel-grid">
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Orders</p>
+                <h3>{ordersView === 'open' ? 'Open orders' : 'Order history'}</h3>
+              </div>
+              <div className="header-actions">
+                <select className="select small" value={ordersView} onChange={(e) => setOrdersView(e.target.value as 'open' | 'history')}>
+                  <option value="open">Open</option>
+                  <option value="history">History</option>
+                </select>
+                <select className="select small" value={ordersScope} onChange={(e) => setOrdersScope(e.target.value as 'tracked' | 'viewing')} disabled={ordersView === 'history'}>
+                  <option value="tracked">Tracked</option>
+                  <option value="viewing">Viewing</option>
+                </select>
+                <button className="btn soft" onClick={() => void loadOrders()} disabled={ordersLoading}>
+                  {ordersLoading ? 'Loading…' : 'Refresh'}
+                </button>
+              </div>
+            </div>
+            {ordersError ? <p className="error">{ordersError}</p> : null}
+            {ordersView === 'history' ? (
+              <p className="muted">History is shown for the currently viewed symbol ({selectedSymbol.toUpperCase()}).</p>
+            ) : (
+              <p className="muted">
+                Scope: {ordersScope === 'tracked' ? `tracked symbols (${trackedSymbols.join(', ') || 'none'})` : `viewing ${selectedSymbol.toUpperCase()}`}.
+              </p>
+            )}
+
+            {ordersView === 'open' ? (
+              openOrders.length ? (
+                <div className="table">
+                  <div className="tr th tr-orders">
+                    <div>Pair</div>
+                    <div>Type</div>
+                    <div>Side</div>
+                    <div className="right">Price</div>
+                    <div className="right">Amount</div>
+                    <div className="right">Filled</div>
+                    <div className="right">Total</div>
+                    <div className="right">Updated</div>
+                  </div>
+                  {openOrders.map((o) => {
+                    const filledPct = o.origQty > 0 ? (o.executedQty / o.origQty) * 100 : 0;
+                    const total = o.cummulativeQuoteQty > 0 ? o.cummulativeQuoteQty : o.price * o.origQty;
+                    const isExpanded = expandedOrderId === o.orderId;
+                    const source = o.bot?.source ?? 'unknown';
+                    return (
+                      <div key={`${o.symbol}-${o.orderId}`}>
+                        <button
+                          className={isExpanded ? 'tr tr-orders active' : 'tr tr-orders'}
+                          onClick={() => setExpandedOrderId(isExpanded ? null : o.orderId)}
+                        >
+                          <div className="mono">{o.symbol}</div>
+                          <div className="mono">{o.type}</div>
+                          <div className={o.side === 'SELL' ? 'negative' : 'positive'}>{o.side}</div>
+                          <div className="right mono">{o.price > 0 ? formatCompactNumber(o.price) : '—'}</div>
+                          <div className="right mono">{formatCompactNumber(o.origQty)}</div>
+                          <div className="right mono">{filledPct > 0 ? `${filledPct.toFixed(0)}%` : '0%'}</div>
+                          <div className="right mono">{total > 0 ? formatCompactNumber(total) : '—'}</div>
+                          <div className="right mono">{new Date((o.updateTime || o.time) ?? 0).toLocaleTimeString()}</div>
+                        </button>
+                        {isExpanded ? (
+                          <div className="order-expand">
+                            <div className="muted">
+                              Status <span className="mono">{o.status}</span> · OrderId <span className="mono">{o.orderId}</span>
+                              {o.stopPrice ? ` · Stop ${formatCompactNumber(o.stopPrice)}` : ''}{' '}
+                              {o.timeInForce ? ` · TIF ${o.timeInForce}` : ''}
+                            </div>
+                            <div className="muted">
+                              Bot source: <span className="mono">{source}</span>
+                              {o.bot?.gridSymbol ? ` · grid ${o.bot.gridSymbol} level ${o.bot.gridLevel}` : ''}
+                              {o.bot?.positionKey ? ` · position ${o.bot.positionKey}` : ''}
+                              {o.bot?.ocoOrderListId ? ` · OCO ${o.bot.ocoOrderListId}` : ''}
+                            </div>
+                            {o.bot?.ai ? (
+                              <div className="ai-note">
+                                <div className="mono">
+                                  AI policy: {o.bot.ai.action} · {(o.bot.ai.confidence * 100).toFixed(0)}% · {new Date(o.bot.ai.at).toLocaleTimeString()}
+                                </div>
+                                <div>{o.bot.ai.reason}</div>
+                              </div>
+                            ) : (
+                              <div className="muted">
+                                {data?.aiPolicyMode && data.aiPolicyMode !== 'off'
+                                  ? 'No AI decision is linked to this order (it may be a grid level, an engine exit, or an external/manual order).'
+                                  : 'AI policy is off; orders are driven by the engine (or manual/external).'}
+                              </div>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="muted">No open orders.</p>
+              )
+            ) : orderHistory.length ? (
+              <div className="table">
+                <div className="tr th tr-orders">
+                  <div>Pair</div>
+                  <div>Status</div>
+                  <div>Side</div>
+                  <div className="right">Price</div>
+                  <div className="right">Amount</div>
+                  <div className="right">Filled</div>
+                  <div className="right">Total</div>
+                  <div className="right">Time</div>
+                </div>
+                {orderHistory.map((o) => {
+                  const total = o.cummulativeQuoteQty > 0 ? o.cummulativeQuoteQty : o.price * o.executedQty;
+                  const isExpanded = expandedOrderId === o.orderId;
+                  return (
+                    <div key={`${o.symbol}-${o.orderId}`}>
+                      <button className={isExpanded ? 'tr tr-orders active' : 'tr tr-orders'} onClick={() => setExpandedOrderId(isExpanded ? null : o.orderId)}>
+                        <div className="mono">{o.symbol}</div>
+                        <div className="mono">{o.status}</div>
+                        <div className={o.side === 'SELL' ? 'negative' : 'positive'}>{o.side}</div>
+                        <div className="right mono">{o.price > 0 ? formatCompactNumber(o.price) : '—'}</div>
+                        <div className="right mono">{formatCompactNumber(o.origQty)}</div>
+                        <div className="right mono">{formatCompactNumber(o.executedQty)}</div>
+                        <div className="right mono">{total > 0 ? formatCompactNumber(total) : '—'}</div>
+                        <div className="right mono">{new Date((o.updateTime || o.time) ?? 0).toLocaleTimeString()}</div>
+                      </button>
+                      {isExpanded ? (
+                        <div className="order-expand">
+                          <div className="muted">
+                            Type <span className="mono">{o.type}</span> · OrderId <span className="mono">{o.orderId}</span>
+                            {o.stopPrice ? ` · Stop ${formatCompactNumber(o.stopPrice)}` : ''}{' '}
+                            {o.timeInForce ? ` · TIF ${o.timeInForce}` : ''}
+                          </div>
+                          <div className="muted">
+                            Bot source: <span className="mono">{o.bot?.source ?? 'unknown'}</span>
+                            {o.bot?.gridSymbol ? ` · grid ${o.bot.gridSymbol} level ${o.bot.gridLevel}` : ''}
+                            {o.bot?.positionKey ? ` · position ${o.bot.positionKey}` : ''}
+                            {o.bot?.ocoOrderListId ? ` · OCO ${o.bot.ocoOrderListId}` : ''}
+                          </div>
+                          {o.bot?.ai ? (
+                            <div className="ai-note">
+                              <div className="mono">
+                                AI policy: {o.bot.ai.action} · {(o.bot.ai.confidence * 100).toFixed(0)}% · {new Date(o.bot.ai.at).toLocaleTimeString()}
+                              </div>
+                              <div>{o.bot.ai.reason}</div>
+                            </div>
+                          ) : (
+                            <div className="muted">No linked AI decision for this order.</div>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted">No orders in history for {selectedSymbol.toUpperCase()} (or Binance returned none).</p>
+            )}
           </div>
         </div>
       ) : null}

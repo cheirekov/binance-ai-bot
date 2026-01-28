@@ -235,3 +235,53 @@ export interface PanicLiquidateResponse {
 export interface SweepUnusedResponse extends PanicLiquidateResponse {
   protectedAssets?: string[];
 }
+
+export interface OrderBotContext {
+  source: 'grid' | 'position' | 'unknown';
+  gridSymbol?: string;
+  gridLevel?: string;
+  positionKey?: string;
+  ocoOrderListId?: number;
+  ai?: {
+    at: number;
+    action: AiPolicyAction;
+    confidence: number;
+    symbol?: string;
+    horizon?: Horizon;
+    positionKey?: string;
+    reason: string;
+  };
+}
+
+export interface OrderRow {
+  symbol: string;
+  orderId: number;
+  clientOrderId?: string;
+  orderListId?: number;
+  side: string;
+  type: string;
+  status: string;
+  timeInForce?: string;
+  price: number;
+  stopPrice?: number;
+  origQty: number;
+  executedQty: number;
+  cummulativeQuoteQty: number;
+  time: number;
+  updateTime: number;
+  bot?: OrderBotContext;
+}
+
+export interface OpenOrdersResponse {
+  ok: boolean;
+  venue: 'spot' | 'futures';
+  symbols: string[];
+  openOrders: OrderRow[];
+}
+
+export interface OrderHistoryResponse {
+  ok: boolean;
+  venue: 'spot' | 'futures';
+  symbol: string;
+  orders: OrderRow[];
+}

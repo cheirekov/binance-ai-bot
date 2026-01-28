@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-import { PanicLiquidateResponse, StrategyResponse, SweepUnusedResponse } from './types';
+import { OpenOrdersResponse, OrderHistoryResponse, PanicLiquidateResponse, StrategyResponse, SweepUnusedResponse } from './types';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8788',
@@ -72,4 +72,22 @@ export const stopGrid = async (symbol: string) => {
 export const applyAiTuning = async (params?: { dryRun?: boolean }) => {
   const { data } = await api.post('/ai-policy/apply-tuning', params ?? {});
   return data as { ok: boolean; at?: number; applied?: Record<string, unknown>; wouldApply?: Record<string, unknown>; error?: string };
+};
+
+export const fetchOpenOrders = async (params?: { symbol?: string; symbols?: string[] }) => {
+  const { data } = await api.get<OpenOrdersResponse>('/orders/open', {
+    params: params?.symbol
+      ? { symbol: params.symbol }
+      : params?.symbols?.length
+        ? { symbols: params.symbols.join(',') }
+        : undefined,
+  });
+  return data;
+};
+
+export const fetchOrderHistory = async (params: { symbol: string; limit?: number }) => {
+  const { data } = await api.get<OrderHistoryResponse>('/orders/history', {
+    params: { symbol: params.symbol, limit: params.limit ?? 50 },
+  });
+  return data;
 };

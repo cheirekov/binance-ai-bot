@@ -59,6 +59,8 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `POST /grid/start` — `{ symbol }` (spot only; starts a grid on the symbol)
 - `POST /grid/stop` — `{ symbol }` (spot only; stops a grid and cancels tracked orders)
 - `POST /portfolio/panic-liquidate` — `{ dryRun?: boolean, stopAutoTrade?: boolean }` (sell free balances to `HOME_ASSET` where markets exist)
+- `GET /orders/open` — open orders (spot/futures). Optional query: `symbol=BTCUSDC` or `symbols=BTCUSDC,ETHUSDC`
+- `GET /orders/history` — order history for a symbol. Query: `symbol=BTCUSDC&limit=50`
 - `POST /portfolio/sweep-unused` — `{ dryRun?, stopAutoTrade?, keepAllowedQuotes?, keepPositionAssets?, keepAssets? }` (sell unused free balances to `HOME_ASSET`)
 - `POST /ai-policy/apply-tuning` — `{ dryRun?: boolean }` (apply last AI policy tuning suggestion; persists to `state.json`)
 
