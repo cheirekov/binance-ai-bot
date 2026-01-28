@@ -62,6 +62,22 @@ export interface GridOrder {
   lastSeenAt?: number;
 }
 
+export interface GridPerformance {
+  startAt: number;
+  startValueHome: number;
+  lastAt: number;
+  lastValueHome: number;
+  pnlHome: number;
+  pnlPct: number;
+  baseVirtual: number;
+  quoteVirtual: number;
+  feesHome: number;
+  fillsBuy: number;
+  fillsSell: number;
+  lastFillAt?: number;
+  breakouts: number;
+}
+
 export interface GridState {
   symbol: string;
   status: GridStatus;
@@ -80,6 +96,7 @@ export interface GridState {
   lastTickAt?: number;
   lastError?: string;
   ordersByLevel: Record<string, GridOrder>;
+  performance?: GridPerformance;
 }
 
 export interface StrategyPlan {
@@ -168,6 +185,15 @@ export interface StrategyResponse {
       side: 'BUY' | 'SELL';
       entryPrice: number;
       size: number;
+      stopLoss?: number;
+      takeProfit?: number[];
+      baseAsset?: string;
+      quoteAsset?: string;
+      homeAsset?: string;
+      notionalHome?: number;
+      ocoOrderListId?: number;
+      venue?: 'spot' | 'futures';
+      leverage?: number;
       openedAt: number;
     }
   >;

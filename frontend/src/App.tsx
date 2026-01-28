@@ -12,16 +12,29 @@ import {
   sweepUnused,
   triggerRefresh,
 } from './api';
-import { Balance, StrategyPlan, StrategyResponse } from './types';
+import { Balance, GridState, StrategyPlan, StrategyResponse } from './types';
+
+const formatCompactNumber = (value: number, options?: { maxDecimals?: number }) => {
+  const maxDecimals = options?.maxDecimals ?? 8;
+  if (!Number.isFinite(value)) return '—';
+  const abs = Math.abs(value);
+  if (abs === 0) return '0';
+  if (abs >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (abs >= 1) return value.toLocaleString(undefined, { maximumFractionDigits: Math.min(6, maxDecimals) });
+  if (abs >= 0.01) return value.toLocaleString(undefined, { maximumFractionDigits: Math.min(8, maxDecimals) });
+  // very small: show significant digits rather than rounding to 0.00
+  return value.toLocaleString(undefined, { maximumSignificantDigits: 6 });
+};
 
 const formatPrice = (value: number | undefined, quoteAsset: string | undefined, digits = 8) => {
   if (value === undefined) return '—';
   const qa = quoteAsset?.toUpperCase();
   const fiatQuotes = ['USD', 'USDT', 'USDC', 'EUR', 'BUSD'];
   if (qa && fiatQuotes.includes(qa)) {
-    if (qa === 'EUR') return `€${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    if (qa === 'USD') return `$${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
-    return `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} ${qa}`;
+    const formatted = formatCompactNumber(value, { maxDecimals: 10 });
+    if (qa === 'EUR') return `€${formatted}`;
+    if (qa === 'USD') return `$${formatted}`;
+    return `${formatted} ${qa}`;
   }
   return `${value.toFixed(digits)} ${qa ?? ''}`.trim();
 };
@@ -66,19 +79,27 @@ const StrategyCard = ({ plan }: { plan: StrategyPlan }) => (
   </div>
 );
 
-const BalanceRow = ({ balance }: { balance: Balance }) => (
-  <div className="balance-row">
-    <span>{balance.asset}</span>
-    <span className="muted">
-      {balance.free} free / {balance.locked} locked
-    </span>
-  </div>
-);
+const BalanceRow = ({ balance }: { balance: Balance }) => {
+  const total = (balance.free ?? 0) + (balance.locked ?? 0);
+  return (
+    <div className="balance-row">
+      <span className="mono">{balance.asset}</span>
+      <span className="muted mono">
+        {formatCompactNumber(total)} total · {formatCompactNumber(balance.free ?? 0)} free / {formatCompactNumber(balance.locked ?? 0)} locked
+      </span>
+    </div>
+  );
+};
 
 function App() {
   const [data, setData] = useState<StrategyResponse | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState(() => localStorage.getItem('selectedSymbol') ?? '');
   const [availableSymbols, setAvailableSymbols] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('activeTab') ?? 'overview');
+  const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
+  const [balancesView, setBalancesView] = useState<'relevant' | 'all'>(() => (localStorage.getItem('balancesView') as 'relevant' | 'all') ?? 'relevant');
+  const [balanceQuery, setBalanceQuery] = useState('');
+  const [showDustBalances, setShowDustBalances] = useState(() => (localStorage.getItem('showDustBalances') ?? 'false') === 'true');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [panicRunning, setPanicRunning] = useState(false);
@@ -124,6 +145,18 @@ function App() {
   useEffect(() => {
     if (selectedSymbol) localStorage.setItem('selectedSymbol', selectedSymbol);
   }, [selectedSymbol]);
+
+  useEffect(() => {
+    localStorage.setItem('activeTab', activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem('balancesView', balancesView);
+  }, [balancesView]);
+
+  useEffect(() => {
+    localStorage.setItem('showDustBalances', String(showDustBalances));
+  }, [showDustBalances]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -396,6 +429,80 @@ function App() {
     return positions.sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0));
   }, [data?.positions]);
 
+  const openPositionRows = useMemo(() => {
+    const entries = Object.entries(data?.positions ?? {});
+    return entries
+      .map(([key, p]) => ({ key, ...p }))
+      .filter((p) => !!p.symbol)
+      .sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0));
+  }, [data?.positions]);
+
+  const selectedPosition = useMemo(() => {
+    if (!selectedPositionKey) return null;
+    const p = data?.positions?.[selectedPositionKey];
+    if (!p) return null;
+    return { key: selectedPositionKey, ...p };
+  }, [data?.positions, selectedPositionKey]);
+
+  const relevantAssets = useMemo(() => {
+    const assets = new Set<string>();
+    if (data?.homeAsset) assets.add(data.homeAsset.toUpperCase());
+    if (data?.quoteAsset) assets.add(data.quoteAsset.toUpperCase());
+    // Position assets
+    for (const p of Object.values(data?.positions ?? {})) {
+      if (!p) continue;
+      if (p.baseAsset) assets.add(p.baseAsset.toUpperCase());
+      if (p.quoteAsset) assets.add(p.quoteAsset.toUpperCase());
+      if (p.homeAsset) assets.add(p.homeAsset.toUpperCase());
+    }
+    // Grid assets
+    for (const g of Object.values(data?.grids ?? {})) {
+      if (!g) continue;
+      if (g.status !== 'running') continue;
+      if (g.baseAsset) assets.add(g.baseAsset.toUpperCase());
+      if (g.quoteAsset) assets.add(g.quoteAsset.toUpperCase());
+      if (g.homeAsset) assets.add(g.homeAsset.toUpperCase());
+    }
+    return assets;
+  }, [data?.grids, data?.homeAsset, data?.positions, data?.quoteAsset]);
+
+  const filteredBalances = useMemo(() => {
+    const balances = data?.balances ?? [];
+    const query = balanceQuery.trim().toUpperCase();
+    const home = data?.homeAsset?.toUpperCase();
+    const minTotalToShow = showDustBalances ? 0 : 0.00000001;
+
+    const rows = balances
+      .map((b) => ({ ...b, asset: b.asset.toUpperCase() }))
+      .filter((b) => (b.free ?? 0) + (b.locked ?? 0) > minTotalToShow)
+      .filter((b) => (balancesView === 'all' ? true : relevantAssets.has(b.asset)))
+      .filter((b) => (query ? b.asset.includes(query) : true))
+      .sort((a, b) => (b.locked ?? 0) - (a.locked ?? 0) || (b.free ?? 0) - (a.free ?? 0) || a.asset.localeCompare(b.asset));
+
+    // Always keep HOME visible in "relevant" mode.
+    if (balancesView === 'relevant' && home) {
+      const hasHome = rows.some((b) => b.asset === home);
+      if (!hasHome) {
+        const hb = balances.find((b) => b.asset.toUpperCase() === home);
+        if (hb) rows.unshift({ ...hb, asset: home });
+      }
+    }
+    return rows;
+  }, [balanceQuery, balancesView, data?.balances, data?.homeAsset, relevantAssets, showDustBalances]);
+
+  const modeHint = useMemo(() => {
+    if (data?.aiPolicyMode && data.aiPolicyMode !== 'off') return 'policy';
+    if (data?.gridEnabled && !data?.portfolioEnabled) return 'grid-only';
+    if (data?.portfolioEnabled) return 'portfolio';
+    return 'strategies';
+  }, [data?.aiPolicyMode, data?.gridEnabled, data?.portfolioEnabled]);
+
+  useEffect(() => {
+    if (!localStorage.getItem('activeTab')) {
+      setActiveTab(modeHint === 'policy' || modeHint === 'portfolio' ? 'positions' : 'overview');
+    }
+  }, [modeHint]);
+
   return (
     <div className="page">
       <div className="hero">
@@ -598,103 +705,336 @@ function App() {
         </div>
       </div>
 
-      {market && (
-        <div className="market">
-          <div className="market-card">
-            <div>
-              <p className="label">{market.symbol}</p>
-              <h2>{formatPrice(market.price, quote)}</h2>
-              <p className={market.priceChangePercent >= 0 ? 'positive' : 'negative'}>
-                {market.priceChangePercent.toFixed(2)}%
-              </p>
+      <div className="tabs">
+        <button className={activeTab === 'overview' ? 'tab active' : 'tab'} onClick={() => setActiveTab('overview')}>
+          Overview
+        </button>
+        <button className={activeTab === 'positions' ? 'tab active' : 'tab'} onClick={() => setActiveTab('positions')}>
+          Positions
+          {openPositionRows.length ? <span className="tab-badge">{openPositionRows.length}</span> : null}
+        </button>
+        <button
+          className={activeTab === 'grid' ? 'tab active' : 'tab'}
+          onClick={() => setActiveTab('grid')}
+          disabled={data?.tradeVenue === 'futures'}
+          title={data?.tradeVenue === 'futures' ? 'Grid is spot-only' : undefined}
+        >
+          Grid
+        </button>
+        <button className={activeTab === 'strategies' ? 'tab active' : 'tab'} onClick={() => setActiveTab('strategies')}>
+          Strategies
+        </button>
+        <button className={activeTab === 'universe' ? 'tab active' : 'tab'} onClick={() => setActiveTab('universe')}>
+          Universe
+        </button>
+      </div>
+
+      {activeTab === 'overview' ? (
+        <div className="panel-grid">
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Market</p>
+                <h3>{market?.symbol ?? selectedSymbol}</h3>
+              </div>
+              {market ? (
+                <span className={market.priceChangePercent >= 0 ? 'chip positive' : 'chip negative'}>
+                  {market.priceChangePercent.toFixed(2)}%
+                </span>
+              ) : null}
             </div>
-            <div className="grid">
-              <div>
-                <p className="muted">High/Low</p>
-                <p>
-                  {market.highPrice} / {market.lowPrice}
-                </p>
+            {market ? (
+              <div className="row">
+                <div>
+                  <p className="label">Price</p>
+                  <p className="value">{formatPrice(market.price, quote)}</p>
+                  <p className="muted">
+                    High {formatCompactNumber(market.highPrice, { maxDecimals: 10 })} · Low {formatCompactNumber(market.lowPrice, { maxDecimals: 10 })}
+                  </p>
+                </div>
+                <div>
+                  <p className="label">Volume</p>
+                  <p className="value">{formatCompactNumber(market.volume, { maxDecimals: 2 })}</p>
+                  <p className="muted">Updated {new Date(market.updatedAt).toLocaleTimeString()}</p>
+                </div>
               </div>
-              <div>
-                <p className="muted">Volume</p>
-                <p>{market.volume.toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="muted">Updated</p>
-                <p>{new Date(market.updatedAt).toLocaleTimeString()}</p>
-              </div>
-            </div>
+            ) : (
+              <p className="muted">No market snapshot yet. Use “Refresh now”.</p>
+            )}
           </div>
-          <div className="market-card">
-            <p className="label">{data?.tradeVenue === 'futures' ? 'Futures balances' : 'Balances'}</p>
-            {data?.balances && data.balances.length > 0 ? (
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Wallet</p>
+                <h3>{data?.tradeVenue === 'futures' ? 'Futures balances' : 'Balances'}</h3>
+              </div>
+              <div className="header-actions">
+                <select className="select small" value={balancesView} onChange={(e) => setBalancesView(e.target.value as 'relevant' | 'all')}>
+                  <option value="relevant">Relevant</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
+            </div>
+            <div className="row">
+              <div>
+                <p className="muted">
+                  Free = available to trade. Locked = reserved in open orders (OCO/grid/limits). Balances update on the last refresh tick for the viewed symbol.
+                </p>
+                <div className="actions">
+                  <input
+                    className="input"
+                    placeholder="Filter assets… (e.g. TAO)"
+                    value={balanceQuery}
+                    onChange={(e) => setBalanceQuery(e.target.value)}
+                  />
+                  <label className="checkbox">
+                    <input
+                      type="checkbox"
+                      checked={showDustBalances}
+                      onChange={(e) => setShowDustBalances(e.target.checked)}
+                    />
+                    <span>Show dust</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+            {filteredBalances.length ? (
               <div className="balance-list">
-                {data.balances.map((balance) => (
+                {filteredBalances.map((balance) => (
                   <BalanceRow key={balance.asset} balance={balance} />
                 ))}
               </div>
             ) : (
-              <p className="muted">Connect Binance keys to load balances.</p>
+              <p className="muted">No balances to show (check keys, filters, and refresh).</p>
             )}
-          </div>
-        </div>
-      )}
-
-      <div className="strategies">
-        {data?.strategies ? (
-          [
-            { key: 'short', plan: data.strategies.short },
-            { key: 'medium', plan: data.strategies.medium },
-            { key: 'long', plan: data.strategies.long },
-          ].map(({ key, plan }) => <StrategyCard key={key} plan={plan} />)
-        ) : (
-          <p className="muted">
-            {data?.status === 'refreshing'
-              ? 'Refreshing strategy...'
-              : data?.status === 'error'
-                ? `Refresh failed: ${data.error ?? 'Unknown error'}`
-                : `No strategy yet for ${selectedSymbol}. Waiting for first refresh...`}
-          </p>
-        )}
-      </div>
-
-      {data?.rankedCandidates?.length ? (
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <p className="eyebrow">Universe</p>
-              <h3>Top candidates (score)</h3>
-            </div>
-          </div>
-          <div className="row">
-            <ul className="signals">
-              {data.rankedCandidates.slice(0, 10).map((c) => (
-                <li key={c.symbol}>
-                  {c.symbol}: {c.score.toFixed(2)}
-                </li>
-              ))}
-            </ul>
           </div>
         </div>
       ) : null}
 
-      {data?.rankedGridCandidates?.length ? (
-        <div className="card">
-          <div className="card-header">
-            <div>
-              <p className="eyebrow">Grid</p>
-              <h3>Top grid candidates (score)</h3>
+      {activeTab === 'positions' ? (
+        <div className="panel-grid">
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Portfolio</p>
+                <h3>Open positions</h3>
+              </div>
+              <span className="chip">{openPositionRows.length} open</span>
             </div>
+            {openPositionRows.length ? (
+              <div className="table">
+                <div className="tr th">
+                  <div>Symbol</div>
+                  <div>Side</div>
+                  <div>Horizon</div>
+                  <div className="right">Size</div>
+                  <div className="right">Entry</div>
+                  <div className="right">SL</div>
+                  <div className="right">TP</div>
+                </div>
+                {openPositionRows.map((p) => (
+                  <button
+                    key={p.key}
+                    className={selectedPositionKey === p.key ? 'tr active' : 'tr'}
+                    onClick={() => setSelectedPositionKey(p.key)}
+                  >
+                    <div className="mono">{p.symbol.toUpperCase()}</div>
+                    <div className={p.side === 'SELL' ? 'negative' : 'positive'}>{p.side === 'SELL' ? 'SHORT' : 'LONG'}</div>
+                    <div className="mono">{p.horizon}</div>
+                    <div className="right mono">{formatCompactNumber(p.size ?? 0)}</div>
+                    <div className="right mono">{formatCompactNumber(p.entryPrice ?? 0)}</div>
+                    <div className="right mono">{p.stopLoss ? formatCompactNumber(p.stopLoss) : '—'}</div>
+                    <div className="right mono">{p.takeProfit?.length ? p.takeProfit.map((x) => formatCompactNumber(x)).join(' / ') : '—'}</div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No open positions tracked in state.json.</p>
+            )}
           </div>
-          <div className="row">
-            <ul className="signals">
-              {data.rankedGridCandidates.slice(0, 10).map((c) => (
-                <li key={c.symbol}>
-                  {c.symbol}: {c.score.toFixed(2)}
-                </li>
-              ))}
-            </ul>
+
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Details</p>
+                <h3>{selectedPosition ? selectedPosition.symbol.toUpperCase() : 'Select a position'}</h3>
+              </div>
+              {selectedPosition ? (
+                <button className="btn soft" onClick={() => setSelectedSymbol(selectedPosition.symbol.toUpperCase())}>
+                  View symbol
+                </button>
+              ) : null}
+            </div>
+            {selectedPosition ? (
+              <div className="row">
+                <div>
+                  <p className="label">Opened</p>
+                  <p className="value">{new Date(selectedPosition.openedAt).toLocaleString()}</p>
+                  <p className="muted mono">
+                    Key {selectedPosition.key}
+                    {selectedPosition.ocoOrderListId ? ` · OCO ${selectedPosition.ocoOrderListId}` : ''}
+                    {selectedPosition.venue ? ` · ${selectedPosition.venue}` : ''}
+                    {selectedPosition.leverage ? ` · ${selectedPosition.leverage}x` : ''}
+                  </p>
+                </div>
+                <div>
+                  <p className="label">AI policy</p>
+                  {aiDecision ? (
+                    <>
+                      <p className="value">
+                        {aiDecision.action} · {(aiDecision.confidence * 100).toFixed(0)}%
+                      </p>
+                      <p className="muted">
+                        {aiDecision.positionKey && aiDecision.positionKey === selectedPosition.key
+                          ? `This decision targets the selected position.`
+                          : `Last decision: ${new Date(aiDecision.at).toLocaleTimeString()}`}
+                      </p>
+                      <p className="muted">AI: {aiDecision.reason}</p>
+                    </>
+                  ) : (
+                    <p className="muted">AI policy is off or no decision yet.</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p className="muted">Click a position to see details and the latest AI policy reasoning.</p>
+            )}
+
+            {data?.strategies && selectedPosition && selectedSymbol.toUpperCase() === selectedPosition.symbol.toUpperCase() ? (
+              <div className="row">
+                <div>
+                  <p className="label">Strategy context (for the viewed symbol)</p>
+                  <p className="muted">
+                    In AI policy modes, strategies are informational. The policy decides OPEN/CLOSE/HOLD/PANIC; the engine enforces guardrails.
+                  </p>
+                </div>
+              </div>
+            ) : null}
           </div>
+        </div>
+      ) : null}
+
+      {activeTab === 'grid' ? (
+        <div className="panel-grid">
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Grid</p>
+                <h3>Active grids</h3>
+              </div>
+              <span className="chip">
+                {Object.values(data?.grids ?? {}).filter((g) => g.status === 'running').length} running
+              </span>
+            </div>
+            {data?.tradeVenue === 'futures' ? (
+              <p className="muted">Grid mode is spot-only.</p>
+            ) : null}
+
+            {Object.values(data?.grids ?? {}).filter((g) => g.status === 'running').length ? (
+              <div className="grid-list">
+                {Object.values(data?.grids ?? {})
+                  .filter((g) => g.status === 'running')
+                  .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+                  .map((g: GridState) => (
+                    <div key={g.symbol} className="grid-item">
+                      <div className="grid-item-head">
+                        <div>
+                          <div className="mono">{g.symbol}</div>
+                          <div className="muted">
+                            Range {formatCompactNumber(g.lowerPrice)} → {formatCompactNumber(g.upperPrice)} · levels {g.levels} · alloc{' '}
+                            {formatCompactNumber(g.allocationHome)} {g.homeAsset}
+                          </div>
+                        </div>
+                        {g.performance ? (
+                          <div className={g.performance.pnlHome >= 0 ? 'mono positive' : 'mono negative'}>
+                            {(g.performance.pnlHome >= 0 ? '+' : '') + formatCompactNumber(g.performance.pnlHome)} {g.homeAsset} ·{' '}
+                            {(g.performance.pnlPct >= 0 ? '+' : '') + g.performance.pnlPct.toFixed(2)}%
+                          </div>
+                        ) : (
+                          <div className="muted">No performance yet</div>
+                        )}
+                      </div>
+                      {g.performance ? (
+                        <div className="muted">
+                          Value {formatCompactNumber(g.performance.lastValueHome)} · fees~{formatCompactNumber(g.performance.feesHome)} · fills buy/sell{' '}
+                          {g.performance.fillsBuy}/{g.performance.fillsSell} · breakouts {g.performance.breakouts}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              <p className="muted">No running grids. Use “Start grid” or enable auto-grid discovery.</p>
+            )}
+
+            {data?.rankedGridCandidates?.length ? (
+              <details className="details">
+                <summary>Top grid candidates (heuristic)</summary>
+                <ul className="signals">
+                  {data.rankedGridCandidates.slice(0, 10).map((c) => (
+                    <li key={c.symbol}>
+                      {c.symbol}: {c.score.toFixed(2)}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === 'strategies' ? (
+        <div className="strategies">
+          {data?.aiPolicyMode && data.aiPolicyMode !== 'off' ? (
+            <div className="card">
+              <p className="muted">
+                AI policy mode is <span className="mono">{data.aiPolicyMode}</span>. These strategies are informational; entries/exits are gated by the
+                policy + engine guardrails.
+              </p>
+            </div>
+          ) : null}
+          {data?.strategies ? (
+            [
+              { key: 'short', plan: data.strategies.short },
+              { key: 'medium', plan: data.strategies.medium },
+              { key: 'long', plan: data.strategies.long },
+            ].map(({ key, plan }) => <StrategyCard key={key} plan={plan} />)
+          ) : (
+            <p className="muted">
+              {data?.status === 'refreshing'
+                ? 'Refreshing strategy...'
+                : data?.status === 'error'
+                  ? `Refresh failed: ${data.error ?? 'Unknown error'}`
+                  : `No strategy yet for ${selectedSymbol}. Waiting for first refresh...`}
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {activeTab === 'universe' ? (
+        <div className="panel-grid">
+          {data?.rankedCandidates?.length ? (
+            <div className="card">
+              <div className="card-header">
+                <div>
+                  <p className="eyebrow">Universe</p>
+                  <h3>Top candidates (score)</h3>
+                </div>
+              </div>
+              <div className="row">
+                <ul className="signals">
+                  {data.rankedCandidates.slice(0, 20).map((c) => (
+                    <li key={c.symbol}>
+                      {c.symbol}: {c.score.toFixed(2)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ) : (
+            <p className="muted">No universe ranking yet. Enable auto-discovery and wait for a refresh tick.</p>
+          )}
         </div>
       ) : null}
     </div>

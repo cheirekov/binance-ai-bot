@@ -154,6 +154,170 @@ h3 {
   min-width: 140px;
 }
 
+.select.small {
+  min-width: 110px;
+  padding: 7px 10px;
+  border-radius: 10px;
+}
+
+.input {
+  flex: 1;
+  min-width: 180px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e8f0ff;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #a6b3cb;
+  font-size: 13px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
+.header-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.tabs {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 18px 0 16px;
+}
+
+.tab {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e8f0ff;
+  padding: 10px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 700;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tab.active {
+  background: linear-gradient(120deg, rgba(18, 194, 233, 0.22), rgba(14, 210, 247, 0.14));
+  border-color: rgba(18, 194, 233, 0.55);
+}
+
+.tab-badge {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.details {
+  margin-top: 12px;
+}
+
+.details summary {
+  cursor: pointer;
+  color: #8dd9ff;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tr {
+  display: grid;
+  grid-template-columns: 1.2fr 0.7fr 0.7fr 0.8fr 0.9fr 0.9fr 1.4fr;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  text-align: left;
+  color: inherit;
+}
+
+.tr.th {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 12px;
+  cursor: default;
+}
+
+.tr.active {
+  border-color: rgba(18, 194, 233, 0.55);
+  background: rgba(18, 194, 233, 0.08);
+}
+
+.tr:not(.th) {
+  cursor: pointer;
+}
+
+.tr:not(.th):hover {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.right {
+  text-align: right;
+}
+
+.grid-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.grid-item {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.grid-item-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
 .status-card {
   position: relative;
   overflow: hidden;
