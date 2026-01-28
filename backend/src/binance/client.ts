@@ -69,6 +69,69 @@ const toStepString = (value: number, step?: number, fallbackDecimals = 8) => {
   return Number.isFinite(floored) ? floored.toFixed(decimals) : '0';
 };
 
+const toFixedStepString = (value: number, step?: number, fallbackDecimals = 8) => {
+  const decimals = step ? decimalsForStep(step) : fallbackDecimals;
+  return Number.isFinite(value) ? value.toFixed(decimals) : '0';
+};
+
+const roundDownToStep = (value: number, step: number): number => {
+  const decimals = decimalsForStep(step);
+  const floored = Math.floor(value / step) * step;
+  return Number(floored.toFixed(decimals));
+};
+
+const shiftByTicks = (price: number, tickSize: number, ticks: number): number => {
+  const decimals = decimalsForStep(tickSize);
+  const factor = 10 ** decimals;
+  const tickInt = Math.round(tickSize * factor);
+  const priceInt = Math.round(price * factor);
+  const next = priceInt + tickInt * ticks;
+  return Number((next / factor).toFixed(decimals));
+};
+
+export const buildOcoRoundedParams = ({
+  side,
+  quantity,
+  takeProfit,
+  stopLoss,
+  stepSize,
+  tickSize,
+}: {
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  takeProfit: number;
+  stopLoss: number;
+  stepSize?: number;
+  tickSize?: number;
+}) => {
+  if (!tickSize || !Number.isFinite(tickSize) || tickSize <= 0) {
+    throw new Error('OCO rounding requires a valid tickSize');
+  }
+
+  const qty = stepSize ? roundDownToStep(quantity, stepSize) : quantity;
+  const price = roundDownToStep(takeProfit, tickSize);
+  const stopPrice = roundDownToStep(stopLoss, tickSize);
+
+  // Binance requires stopLimitPrice != stopPrice. Enforce >= 1 tick separation in the correct direction.
+  const stopLimitPrice = side === 'SELL' ? shiftByTicks(stopPrice, tickSize, -1) : shiftByTicks(stopPrice, tickSize, 1);
+
+  const qtyStr = toFixedStepString(qty, stepSize);
+  const priceStr = toFixedStepString(price, tickSize);
+  const stopPriceStr = toFixedStepString(stopPrice, tickSize);
+  const stopLimitPriceStr = toFixedStepString(stopLimitPrice, tickSize);
+
+  return {
+    qty,
+    price,
+    stopPrice,
+    stopLimitPrice,
+    qtyStr,
+    priceStr,
+    stopPriceStr,
+    stopLimitPriceStr,
+  };
+};
+
 const isFuturesVenue = () => config.tradeVenue === 'futures';
 
 const getSymbolRules = async (symbol: string) => {
@@ -157,6 +220,23 @@ export const get24hStats = async (symbol: string): Promise<MarketSnapshot> => {
     quoteVolume: data.quoteVolume ? Number(data.quoteVolume) : 0,
     updatedAt: Date.now(),
   };
+};
+
+export const getLatestPrice = async (symbol: string): Promise<number> => {
+  const upper = symbol.toUpperCase();
+  const url = isFuturesVenue()
+    ? `${config.futuresBaseUrl}/fapi/v1/ticker/price?symbol=${encodeURIComponent(upper)}`
+    : `${config.binanceBaseUrl}/api/v3/ticker/price?symbol=${encodeURIComponent(upper)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Binance ticker price failed: HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as { price?: string };
+  const price = data?.price ? Number(data.price) : Number.NaN;
+  if (!Number.isFinite(price) || price <= 0) {
+    throw new Error('Binance ticker price returned invalid value');
+  }
+  return price;
 };
 
 export const getBookTicker = async (symbol: string) => {
@@ -377,14 +457,19 @@ export const placeOcoOrder = async ({
   }
 
   const rules = await getSymbolRules(symbol);
-  const qty = floorToStep(quantity, rules?.stepSize);
-  const price = floorToStep(takeProfit, rules?.tickSize);
-  const stopPrice = floorToStep(stopLoss, rules?.tickSize);
-  const stopLimitPrice = floorToStep(stopPrice * 0.999, rules?.tickSize);
-  const qtyStr = toStepString(quantity, rules?.stepSize);
-  const priceStr = toStepString(takeProfit, rules?.tickSize);
-  const stopPriceStr = toStepString(stopLoss, rules?.tickSize);
-  const stopLimitPriceStr = toStepString(stopPrice * 0.999, rules?.tickSize);
+  const { qty, price, stopPrice, stopLimitPrice, qtyStr, priceStr, stopPriceStr, stopLimitPriceStr } =
+    buildOcoRoundedParams({
+      side,
+      quantity,
+      takeProfit,
+      stopLoss,
+      stepSize: rules?.stepSize,
+      tickSize: rules?.tickSize,
+    });
+
+  if (side === 'SELL' && stopLimitPrice >= stopPrice) {
+    throw new Error('Invalid OCO params: stopLimitPrice must be < stopPrice for SELL');
+  }
 
   if (rules?.minQty && qty < rules.minQty) {
     throw new Error(`OCO quantity ${qty} below minQty ${rules.minQty}`);

@@ -4,12 +4,13 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 
 ## Features
 - Fastify API with Binance Spot client, OpenAI strategy reinforcement, and simple scheduler to keep strategies fresh.
-- Heuristic risk engine that sizes positions by risk-per-trade and estimates maker/taker fees.
+- Regime-based indicator engine (EMA/RSI/ATR/ADX/Bollinger) with deterministic entry/exit levels and risk sizing.
 - React + Vite dashboard for live market stats, AI notes, balances, and quick simulated trades.
 - Universe scanner that auto-picks a wallet-aware “best” symbol and reports the last auto-trade decision.
 - Optional portfolio mode: multiple concurrent long positions, conversion to required quote assets, and “risk-off” return to `HOME_ASSET`.
 - Optional spot grid mode: auto-discovers range-bound candidates (heuristics) and maintains a limit-order grid (spot-only).
 - Optional AI policy (gated): LLM can propose OPEN/CLOSE/HOLD/PANIC and bounded parameter tuning; engine still validates and enforces caps.
+- Optional SQLite persistence for analytics/learning (features, decisions, trades) stored under the Docker volume (`/app/data`).
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
 
 ## Quick start (local)
@@ -63,10 +64,11 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `GET /orders/history` — order history for a symbol. Query: `symbol=BTCUSDC&limit=50`
 - `POST /portfolio/sweep-unused` — `{ dryRun?, stopAutoTrade?, keepAllowedQuotes?, keepPositionAssets?, keepAssets? }` (sell unused free balances to `HOME_ASSET`)
 - `POST /ai-policy/apply-tuning` — `{ dryRun?: boolean }` (apply last AI policy tuning suggestion; persists to `state.json`)
+- `GET /stats/performance` — read-only performance stats (requires `PERSIST_TO_SQLITE=true`)
 
 ## Notes and safety
 - The bot estimates Binance spot fees (0.1% maker/taker) and limits size via `MAX_POSITION_SIZE_USDT` + `RISK_PER_TRADE_BP`.
-- OpenAI assists with thesis notes; heuristics still produce numbers when AI is offline.
+- Signals are deterministic by default (EMA/RSI/ATR/ADX/Bollinger). OpenAI only contributes optional notes and policy suggestions; risk caps and exchange rules remain authoritative.
 - Live trading is **off by default**. Enable only after testing; consider using Binance testnet or a sub-account with tight limits.
 - Frontend shows the current active symbol, the top candidates from the scanner, and the last auto-trade decision/reason.
 - `MIN_QUOTE_VOLUME` is enforced in `HOME_ASSET` terms (BTC/ETH quote volumes are converted using their `*HOME_ASSET` market).
@@ -75,3 +77,4 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - Grid mode is **spot-only** and works best in sideways markets. In trends/breakouts it can accumulate losses; keep `GRID_MAX_ALLOC_PCT` small until you’re confident. Use `GRID_BREAKOUT_ACTION=cancel` to stop grids when price exits the range.
 - AI policy is **gated**: it can only choose actions/symbols from data the bot provides, and the engine still enforces exchange rules (minQty/minNotional), risk flags, allocation caps, and daily loss caps. It can still lose money—test on small size or testnet first.
 - State is persisted to `PERSISTENCE_PATH` (default `./data/state.json`) so the bot resumes last strategies/balances after restart.
+- Optional analytics persistence: set `PERSIST_TO_SQLITE=true` and `SQLITE_PATH=/app/data/bot.sqlite` to store features/decisions/trades inside the existing Docker volume (`./data:/app/data`). SQLite failures are best-effort and never block trading.

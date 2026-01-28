@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { z } from 'zod';
 
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -16,6 +17,14 @@ export interface AiInsight {
   cautions: string[];
   confidence: number;
 }
+
+const aiInsightSchema = z
+  .object({
+    rationale: z.string().min(1).max(1200),
+    cautions: z.array(z.string().min(1).max(200)).max(12),
+    confidence: z.number().min(0).max(1),
+  })
+  .strict();
 
 interface PromptInput {
   horizon: Horizon;
@@ -71,13 +80,18 @@ export const generateAiInsight = async (input: PromptInput): Promise<AiInsight> 
     });
 
     const content = completion.choices[0]?.message?.content ?? '{}';
-    const parsed = JSON.parse(content) as AiInsight;
+    const raw = JSON.parse(content) as unknown;
+    const validated = aiInsightSchema.safeParse(raw);
+    if (!validated.success) {
+      logger.warn({ err: validated.error.flatten() }, 'OpenAI insight failed schema validation; falling back to heuristics');
+      return {
+        rationale: 'AI output could not be validated; using heuristic-only guidance.',
+        cautions: ['Prefer risk control over activity', 'Avoid live trading without confirmation'],
+        confidence: 0.3,
+      };
+    }
 
-    const insight = {
-      rationale: parsed.rationale ?? 'AI returned no rationale',
-      cautions: parsed.cautions ?? [],
-      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
-    };
+    const insight = validated.data;
     insightCache[cacheKey] = { fetchedAt: now, value: insight };
     return insight;
   } catch (error) {
