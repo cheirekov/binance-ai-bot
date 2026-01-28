@@ -180,6 +180,8 @@ export const config = {
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),
   aiPolicySweepCooldownMinutes: numberFromEnv(process.env.AI_POLICY_SWEEP_COOLDOWN_MINUTES, 180),
+  apiRateLimitMax: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_MAX, 120))),
+  apiRateLimitWindowSeconds: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_WINDOW_SECONDS, 10))),
   apiKey: optionalStringFromEnv(process.env.API_KEY),
   clientKey: optionalStringFromEnv(process.env.CLIENT_KEY),
 };

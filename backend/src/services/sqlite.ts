@@ -224,14 +224,23 @@ export const persistDecision = (row: {
   orderId?: string | number;
 }) => {
   enqueueWrite((db) => {
-    db.prepare(
+    const stmt = db.prepare(
       `INSERT INTO decisions (at, symbol, horizon, action, confidence, reason, mode, orderId)
        VALUES (@at, @symbol, @horizon, @action, @confidence, @reason, @mode, @orderId)`,
-    ).run({
-      ...row,
+    );
+
+    const params = {
+      at: row.at,
       symbol: row.symbol.toUpperCase(),
+      horizon: row.horizon ?? null,
+      action: row.action,
+      confidence: row.confidence ?? null,
+      reason: row.reason ?? null,
+      mode: row.mode ?? null,
       orderId: row.orderId !== undefined ? String(row.orderId) : null,
-    });
+    };
+
+    stmt.run(params);
   });
 };
 

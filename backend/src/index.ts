@@ -24,8 +24,15 @@ const bootstrap = async () => {
   });
 
   await fastify.register(rateLimit, {
-    max: 30,
-    timeWindow: '10 seconds',
+    max: config.apiRateLimitMax,
+    timeWindow: `${config.apiRateLimitWindowSeconds} seconds`,
+    keyGenerator: (request) => {
+      const apiKey = request.headers['x-api-key'];
+      if (typeof apiKey === 'string' && apiKey.trim() !== '') return apiKey;
+      if (Array.isArray(apiKey) && apiKey.length && apiKey[0]) return apiKey[0];
+      return request.socket.remoteAddress ?? request.ip ?? 'unknown';
+    },
+    allowList: (request) => request.url === '/health' || request.url.startsWith('/health?'),
   });
 
   fastify.addHook('preHandler', async (request, reply) => {
