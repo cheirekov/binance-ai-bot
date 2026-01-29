@@ -18,6 +18,7 @@ const GOVERNOR_BUY_PAUSE_REASON = 'governor' as const;
 const GRID_GUARD_TREND_REASON = 'trend' as const;
 const GRID_GUARD_BREAKDOWN_REASON = 'breakdown' as const;
 const GRID_GUARD_VOL_SPIKE_REASON = 'vol_spike' as const;
+const AI_BUY_PAUSE_REASON = 'ai' as const;
 
 const gridGuardBreakdownTicksBySymbol = new Map<string, number>();
 const gridGuardResumeOkTicksBySymbol = new Map<string, number>();
@@ -941,6 +942,92 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   };
   persistGrid(persisted, grid.symbol, updated);
   return updated;
+};
+
+export const pauseGridBuys = async (symbolInput: string, params?: { reason?: string }) => {
+  if (config.tradeVenue !== 'spot') return { ok: false as const, error: 'Grid is only available in spot mode.' };
+  if (!config.gridEnabled) return { ok: false as const, error: 'GRID_ENABLED=false' };
+
+  const symbol = symbolInput.toUpperCase();
+  const existing = persisted.grids?.[symbol];
+  if (!existing || existing.status !== 'running') {
+    return { ok: false as const, error: `No running grid for ${symbol}` };
+  }
+
+  const now = Date.now();
+  const reason = (params?.reason ?? AI_BUY_PAUSE_REASON).slice(0, 40) || AI_BUY_PAUSE_REASON;
+
+  const next: GridState = {
+    ...existing,
+    buyPaused: true,
+    buyPauseReason: reason,
+    buyPausedAt: now,
+    updatedAt: now,
+  };
+  persistGrid(persisted, symbol, next);
+
+  // Safe: cancel BUY orders only; keep SELLs active to unwind.
+  if (config.tradingEnabled) {
+    try {
+      const openOrders = await getOpenOrders(symbol);
+      const buyIds = openOrders
+        .map((o) => (o && typeof o === 'object' ? Number((o as Record<string, unknown>).orderId) : 0))
+        .filter((id) => Number.isFinite(id) && id > 0);
+
+      for (const row of openOrders) {
+        if (!row || typeof row !== 'object') continue;
+        const rec = row as Record<string, unknown>;
+        const side = String(rec.side ?? '').toUpperCase();
+        if (side !== 'BUY') continue;
+        const orderId = Number(rec.orderId);
+        if (!Number.isFinite(orderId) || orderId <= 0) continue;
+        try {
+          await cancelOrder(symbol, orderId);
+        } catch (error) {
+          logger.warn({ err: errorToLogObject(error), symbol, orderId }, 'Cancel open BUY order failed (ai pause)');
+        }
+      }
+
+      // Keep local counters stable (avoid resume thrash on next tick).
+      const key = symbol.toUpperCase();
+      liquidityResumeOkTicksBySymbol.set(key, 0);
+      gridGuardResumeOkTicksBySymbol.set(key, 0);
+      gridGuardBreakdownTicksBySymbol.set(key, 0);
+
+      void buyIds; // keep for debugging if needed (no logging of sensitive data)
+    } catch {
+      // ignore
+    }
+  }
+
+  return { ok: true as const };
+};
+
+export const resumeGridBuys = async (symbolInput: string) => {
+  if (config.tradeVenue !== 'spot') return { ok: false as const, error: 'Grid is only available in spot mode.' };
+  if (!config.gridEnabled) return { ok: false as const, error: 'GRID_ENABLED=false' };
+
+  const symbol = symbolInput.toUpperCase();
+  const existing = persisted.grids?.[symbol];
+  if (!existing || existing.status !== 'running') {
+    return { ok: false as const, error: `No running grid for ${symbol}` };
+  }
+
+  // Conservative: only resume if the pause was explicitly initiated by AI.
+  if (!existing.buyPaused || existing.buyPauseReason !== AI_BUY_PAUSE_REASON) {
+    return { ok: false as const, error: `Grid not paused by AI (${existing.buyPauseReason ?? 'none'})` };
+  }
+
+  const now = Date.now();
+  const next: GridState = {
+    ...existing,
+    buyPaused: false,
+    buyPauseReason: undefined,
+    buyPausedAt: undefined,
+    updatedAt: now,
+  };
+  persistGrid(persisted, symbol, next);
+  return { ok: true as const };
 };
 
 export const startOrSyncGrids = async () => {

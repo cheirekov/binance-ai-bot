@@ -30,7 +30,7 @@ const tuneSchema = z
   .optional();
 
 const decisionSchema = z.object({
-  action: z.enum(['HOLD', 'OPEN', 'CLOSE', 'PANIC']),
+  action: z.enum(['HOLD', 'OPEN', 'CLOSE', 'PANIC', 'PAUSE_GRID', 'RESUME_GRID', 'REDUCE_RISK']),
   symbol: z.string().min(3).max(20).optional(),
   horizon: z.enum(['short', 'medium', 'long']).optional(),
   positionKey: z.string().min(3).max(64).optional(),
@@ -119,8 +119,10 @@ const buildOpenPositions = () =>
 
 const systemPrompt = `You are a trading policy engine for a crypto bot.
 Return ONLY a JSON object with keys:
-- action: one of HOLD | OPEN | CLOSE | PANIC
-- symbol?: string (required when action=OPEN)
+- action: one of HOLD | OPEN | CLOSE | PANIC | PAUSE_GRID | RESUME_GRID | REDUCE_RISK
+- symbol?: string
+    - required when action=OPEN (must be one of the provided candidates)
+    - required when action=PAUSE_GRID or RESUME_GRID (must match a running grid symbol)
 - horizon?: short|medium|long (required when action=OPEN)
 - positionKey?: string (required when action=CLOSE; must match exactly one provided open position key)
 - confidence: number 0..1

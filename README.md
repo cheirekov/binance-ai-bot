@@ -27,6 +27,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
    - AI policy (optional): set `AI_POLICY_MODE=advisory` (no trading) or `AI_POLICY_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
      - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.
      - Grid allocation tuning via `GRID_MAX_ALLOC_PCT` is additionally clamped: `AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY` limits how much the AI can increase it per day (decreases are allowed).
+     - Risk relaxation is **disabled by default**: `AI_POLICY_ALLOW_RISK_RELAXATION=false` blocks AI actions that increase risk (e.g. `RESUME_GRID`). Enable it only with explicit operator approval.
    - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `OPENAI_BASE_URL` (for example: local `ollama`, `llama.cpp` server, or `vLLM`).
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.
@@ -99,5 +100,6 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
   - Force drawdown and verify: `CAUTION` blocks new entries; `HALT` blocks new entries + prevents starting new grids.
   - Verify: no market exits occur unless `RISK_HALT_MARKET_EXIT=true`.
 - AI policy is **gated**: it can only choose actions/symbols from data the bot provides, and the engine still enforces exchange rules (minQty/minNotional), risk flags, allocation caps, and daily loss caps. It can still lose money—test on small size or testnet first.
+  - Risk increases proposed by AI are blocked unless `AI_POLICY_ALLOW_RISK_RELAXATION=true` (default false).
 - State is persisted to `PERSISTENCE_PATH` (default `./data/state.json`) so the bot resumes last strategies/balances after restart.
 - Optional analytics persistence: set `PERSIST_TO_SQLITE=true` and `SQLITE_PATH=/app/data/bot.sqlite` to store features/decisions/trades inside the existing Docker volume (`./data:/app/data`). SQLite failures are best-effort and never block trading.

@@ -21,7 +21,7 @@ export type GridStatus = 'running' | 'stopped' | 'error';
 
 export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
-export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
+export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC' | 'PAUSE_GRID' | 'RESUME_GRID' | 'REDUCE_RISK';
 
 export type RiskGovernorState = 'NORMAL' | 'CAUTION' | 'HALT';
 

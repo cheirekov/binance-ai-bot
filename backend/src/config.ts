@@ -206,6 +206,10 @@ export const config = {
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),
   aiPolicySweepCooldownMinutes: numberFromEnv(process.env.AI_POLICY_SWEEP_COOLDOWN_MINUTES, 180),
+
+  // AI policy: risk relaxation is opt-in (safe default false).
+  // Used for actions like RESUME_GRID (treat as increasing risk unless explicitly allowed by operator).
+  aiPolicyAllowRiskRelaxation: boolFromEnv(process.env.AI_POLICY_ALLOW_RISK_RELAXATION, false),
   apiRateLimitMax: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_MAX, 120))),
   apiRateLimitWindowSeconds: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_WINDOW_SECONDS, 10))),
   apiKey: optionalStringFromEnv(process.env.API_KEY),

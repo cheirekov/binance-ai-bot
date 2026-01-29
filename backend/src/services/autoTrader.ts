@@ -18,7 +18,7 @@ import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { runAiPolicy } from './aiPolicy.js';
 import { applyAiTuning } from './aiTuning.js';
 import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
-import { startOrSyncGrids } from './gridTrader.js';
+import { pauseGridBuys, resumeGridBuys, startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
 import {
@@ -2161,6 +2161,97 @@ export const autoTradeTick = async (symbol?: string) => {
           symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
           action: 'skipped',
           reason: `AI policy PANIC: ${aiDecision.reason}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'PAUSE_GRID') {
+        const target = aiDecision.symbol?.toUpperCase();
+        if (!target) {
+          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: missing symbol' });
+          await updateEquityTelemetry();
+          return;
+        }
+
+        if (!config.gridEnabled) {
+          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: GRID_ENABLED=false' });
+          await updateEquityTelemetry();
+          return;
+        }
+
+        const res = await pauseGridBuys(target, { reason: 'ai' });
+        recordDecision({
+          at: aiDecision.at,
+          symbol: target,
+          action: 'skipped',
+          reason: res.ok ? `AI policy PAUSE_GRID: ${aiDecision.reason}`.slice(0, 200) : `AI policy PAUSE_GRID failed: ${res.error}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'RESUME_GRID') {
+        const target = aiDecision.symbol?.toUpperCase();
+        if (!target) {
+          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy RESUME_GRID ignored: missing symbol' });
+          await updateEquityTelemetry();
+          return;
+        }
+
+        // Conservative default: treat RESUME as a risk relaxation. Require explicit operator approval + governor NORMAL.
+        if (!config.aiPolicyAllowRiskRelaxation) {
+          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID ignored: AI_POLICY_ALLOW_RISK_RELAXATION=false' });
+          await updateEquityTelemetry();
+          return;
+        }
+        if (governor && governor.state !== 'NORMAL') {
+          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: `AI policy RESUME_GRID ignored: governor=${governor.state}` });
+          await updateEquityTelemetry();
+          return;
+        }
+        if (!config.gridEnabled) {
+          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID ignored: GRID_ENABLED=false' });
+          await updateEquityTelemetry();
+          return;
+        }
+
+        const res = await resumeGridBuys(target);
+        recordDecision({
+          at: aiDecision.at,
+          symbol: target,
+          action: 'skipped',
+          reason: res.ok ? `AI policy RESUME_GRID: ${aiDecision.reason}`.slice(0, 200) : `AI policy RESUME_GRID failed: ${res.error}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'REDUCE_RISK') {
+        // Tighten-only intent. Entries are disabled for this tick. Optional `tune` may still be applied via existing tuning gate above.
+        if (config.gridEnabled) {
+          await startOrSyncGrids();
+        }
+        if (!config.portfolioEnabled && config.gridEnabled) {
+          recordDecision({
+            at: aiDecision.at,
+            symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
+            action: 'skipped',
+            reason: `AI policy REDUCE_RISK: ${aiDecision.reason}`.slice(0, 200),
+          });
+          await updateEquityTelemetry();
+          return;
+        }
+        if (config.portfolioEnabled) {
+          await portfolioTick(symbol, { entriesAllowed: false });
+        } else {
+          await singleSymbolTick(symbol, { entriesAllowed: false });
+        }
+        recordDecision({
+          at: aiDecision.at,
+          symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
+          action: 'skipped',
+          reason: `AI policy REDUCE_RISK: ${aiDecision.reason}`.slice(0, 200),
         });
         await updateEquityTelemetry();
         return;
