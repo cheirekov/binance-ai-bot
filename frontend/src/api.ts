@@ -1,6 +1,15 @@
 import axios from 'axios';
 
-import { DbStatsResponse, OpenOrdersResponse, OrderHistoryResponse, PanicLiquidateResponse, PerformanceStatsResponse, StrategyResponse, SweepUnusedResponse } from './types';
+import {
+  DbStatsResponse,
+  OpenOrdersResponse,
+  OrderHistoryResponse,
+  PanicLiquidateResponse,
+  PerformanceStatsResponse,
+  PnlReconcileResponse,
+  StrategyResponse,
+  SweepUnusedResponse,
+} from './types';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8788',
@@ -111,6 +120,22 @@ export const fetchDbStatsOptional = async (): Promise<DbStatsResponse | null> =>
   try {
     const { data } = await api.get<DbStatsResponse>('/stats/db');
     if (!data?.persistToSqlite) return null;
+    return data;
+  } catch (err) {
+    const status =
+      typeof err === 'object' && err && 'response' in err
+        ? (err as { response?: { status?: number } }).response?.status
+        : undefined;
+    if (status === 404) return null;
+    return null;
+  }
+};
+
+export const fetchPnlReconcileOptional = async (params?: { window?: string }): Promise<PnlReconcileResponse | null> => {
+  try {
+    const { data } = await api.get<PnlReconcileResponse>('/stats/pnl_reconcile', {
+      params: params?.window ? { window: params.window } : undefined,
+    });
     return data;
   } catch (err) {
     const status =

@@ -309,3 +309,20 @@ export interface DbStatsResponse {
   lastWriteAt: number | null;
   lastError?: string;
 }
+
+export interface PnlReconcileResponse {
+  equityStart: number | null;
+  equityNow: number | null;
+  equityChange: number | null;
+  gridRealizedPnl: number | null;
+  gridUnrealizedPnl: number | null;
+  portfolioRealizedPnl: number | null;
+  portfolioUnrealizedPnl: number | null;
+  feesHomeTotal: number | null;
+  conversionLossEstimate: number | null;
+  residual: number | null;
+  windowMs?: number;
+  startAt?: number;
+  nowAt?: number;
+  notes?: string[];
+}

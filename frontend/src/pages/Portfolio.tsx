@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { fetchPerformanceStatsOptional } from '../api';
+import { fetchPerformanceStatsOptional, fetchPnlReconcileOptional } from '../api';
 import { Card } from '../components/ui/Card';
 import { Chip } from '../components/ui/Chip';
-import { PerformanceStatsResponse, StrategyResponse } from '../types';
+import { PerformanceStatsResponse, PnlReconcileResponse, StrategyResponse } from '../types';
 import { formatCompactNumber, formatPrice } from '../utils/format';
 import { formatAgo } from '../utils/time';
 
@@ -22,9 +22,12 @@ const estimatePositionPnl = (p: { side: 'BUY' | 'SELL'; entryPrice: number; size
   return p.side === 'SELL' ? -diff : diff;
 };
 
+const toneForSigned = (value: number | null) => (value === null ? 'value' : value >= 0 ? 'value positive' : 'value negative');
+
 export const PortfolioPage = (props: { data: StrategyResponse | null; loading: boolean }) => {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [perf, setPerf] = useState<PerformanceStatsResponse | null>(null);
+  const [pnl, setPnl] = useState<PnlReconcileResponse | null>(null);
   const [showAllDays, setShowAllDays] = useState(false);
   const data = props.data;
   const balances = useMemo(() => (data?.balances ?? []).map((b) => ({ asset: b.asset.toUpperCase(), free: b.free ?? 0, locked: b.locked ?? 0 })), [data?.balances]);
@@ -56,6 +59,21 @@ export const PortfolioPage = (props: { data: StrategyResponse | null; loading: b
     })();
     return () => {
       cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const res = await fetchPnlReconcileOptional({ window: '24h' });
+      if (cancelled) return;
+      setPnl(res);
+    };
+    void load();
+    const interval = window.setInterval(() => void load(), 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
     };
   }, []);
 
@@ -238,6 +256,87 @@ export const PortfolioPage = (props: { data: StrategyResponse | null; loading: b
             ) : (
               <p className="muted">No trade history yet.</p>
             )}
+          </Card>
+        ) : null}
+
+        {pnl ? (
+          <Card
+            eyebrow="PnL"
+            title="PnL breakdown"
+            subtitle={pnl.nowAt ? `Window 24h · computed ${formatAgo(pnl.nowAt)}` : 'Window 24h'}
+          >
+            <div className="kv-grid">
+              <div className="kv">
+                <div className="label">Equity start</div>
+                <div className="value">{pnl.equityStart === null ? '—' : formatCompactNumber(pnl.equityStart, { maxDecimals: 2 })}</div>
+              </div>
+              <div className="kv">
+                <div className="label">Equity now</div>
+                <div className="value">{pnl.equityNow === null ? '—' : formatCompactNumber(pnl.equityNow, { maxDecimals: 2 })}</div>
+              </div>
+              <div className="kv">
+                <div className="label">Equity change</div>
+                <div className={toneForSigned(pnl.equityChange)}>
+                  {pnl.equityChange === null ? '—' : `${pnl.equityChange >= 0 ? '+' : ''}${formatCompactNumber(pnl.equityChange, { maxDecimals: 2 })}`}
+                  {data?.equity?.homeAsset ? ` ${data.equity.homeAsset}` : ''}
+                </div>
+              </div>
+              <div className="kv" title="Grid performance is not total account PnL. It only covers the grid strategy’s fills and inventory.">
+                <div className="label">Grid realized</div>
+                <div className={toneForSigned(pnl.gridRealizedPnl)}>
+                  {pnl.gridRealizedPnl === null ? '—' : `${pnl.gridRealizedPnl >= 0 ? '+' : ''}${formatCompactNumber(pnl.gridRealizedPnl, { maxDecimals: 2 })}`}
+                </div>
+              </div>
+              <div className="kv" title="Grid performance is not total account PnL. It only covers the grid strategy’s fills and inventory.">
+                <div className="label">Grid unrealized</div>
+                <div className={toneForSigned(pnl.gridUnrealizedPnl)}>
+                  {pnl.gridUnrealizedPnl === null ? '—' : `${pnl.gridUnrealizedPnl >= 0 ? '+' : ''}${formatCompactNumber(pnl.gridUnrealizedPnl, { maxDecimals: 2 })}`}
+                </div>
+              </div>
+              <div className="kv">
+                <div className="label">Portfolio realized</div>
+                <div className={toneForSigned(pnl.portfolioRealizedPnl)}>
+                  {pnl.portfolioRealizedPnl === null ? '—' : `${pnl.portfolioRealizedPnl >= 0 ? '+' : ''}${formatCompactNumber(pnl.portfolioRealizedPnl, { maxDecimals: 2 })}`}
+                </div>
+              </div>
+              <div className="kv">
+                <div className="label">Portfolio unrealized</div>
+                <div className={toneForSigned(pnl.portfolioUnrealizedPnl)}>
+                  {pnl.portfolioUnrealizedPnl === null ? '—' : `${pnl.portfolioUnrealizedPnl >= 0 ? '+' : ''}${formatCompactNumber(pnl.portfolioUnrealizedPnl, { maxDecimals: 2 })}`}
+                </div>
+              </div>
+              <div className="kv">
+                <div className="label">Fees</div>
+                <div className={toneForSigned(pnl.feesHomeTotal)}>
+                  {pnl.feesHomeTotal === null ? '—' : `${pnl.feesHomeTotal >= 0 ? '+' : ''}${formatCompactNumber(pnl.feesHomeTotal, { maxDecimals: 2 })}`}
+                </div>
+              </div>
+              {data?.conversionEnabled ? (
+                <div className="kv">
+                  <div className="label">Conversion loss (est.)</div>
+                  <div className={toneForSigned(pnl.conversionLossEstimate)}>
+                    {pnl.conversionLossEstimate === null ? '—' : `${pnl.conversionLossEstimate >= 0 ? '+' : ''}${formatCompactNumber(pnl.conversionLossEstimate, { maxDecimals: 2 })}`}
+                  </div>
+                </div>
+              ) : null}
+              <div className="kv">
+                <div className="label">Residual</div>
+                <div className={pnl.residual !== null && Math.abs(pnl.residual) < 0.0001 ? 'value' : pnl.residual !== null && pnl.residual >= 0 ? 'value positive' : 'value negative'}>
+                  {pnl.residual === null ? '—' : `${pnl.residual >= 0 ? '+' : ''}${formatCompactNumber(pnl.residual, { maxDecimals: 2 })}`}
+                </div>
+              </div>
+            </div>
+            {pnl.notes?.length ? (
+              <>
+                <div className="divider" />
+                <div className="label">Notes</div>
+                <ul className="bullets">
+                  {pnl.notes.slice(0, 6).map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
           </Card>
         ) : null}
 

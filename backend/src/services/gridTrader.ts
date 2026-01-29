@@ -5,7 +5,7 @@ import { logger } from '../logger.js';
 import { Balance, GridOrder, GridState } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getPersistedState, persistGrid, persistMeta } from './persistence.js';
-import { persistGridFill } from './sqlite.js';
+import { persistGridFill, persistTradeFill } from './sqlite.js';
 
 const persisted = getPersistedState();
 
@@ -431,7 +431,24 @@ const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: 
     const order = await placeOrder({ symbol: grid.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
     const now = Date.now();
     const fill = extractGridFillRow(grid.symbol, order, now);
-    if (fill) persistGridFill(fill);
+    if (fill) {
+      persistGridFill(fill);
+      persistTradeFill({
+        at: fill.at,
+        symbol: fill.symbol,
+        module: 'grid',
+        side: fill.side as 'BUY' | 'SELL',
+        qty: fill.executedQty,
+        price: fill.price ?? fill.notional / fill.executedQty,
+        notional: fill.notional,
+        feeAsset: undefined,
+        feeAmount: undefined,
+        feesHome: fill.feeEst ?? undefined,
+        quoteAsset: grid.quoteAsset,
+        homeAsset: grid.homeAsset,
+        orderId: fill.orderId,
+      });
+    }
     const perf = ensurePerformance(grid, now);
     const nextPerf = applyFillToPerformance(perf, order, now);
     grid = { ...grid, performance: nextPerf };
@@ -486,7 +503,24 @@ const liquidateGridBaseToHome = async (
   try {
     const order = await placeOrder({ symbol: grid.symbol, side: 'SELL', quantity: qty, type: 'MARKET' });
     const fill = extractGridFillRow(grid.symbol, order, now);
-    if (fill) persistGridFill(fill);
+    if (fill) {
+      persistGridFill(fill);
+      persistTradeFill({
+        at: fill.at,
+        symbol: fill.symbol,
+        module: 'grid',
+        side: fill.side as 'BUY' | 'SELL',
+        qty: fill.executedQty,
+        price: fill.price ?? fill.notional / fill.executedQty,
+        notional: fill.notional,
+        feeAsset: undefined,
+        feeAmount: undefined,
+        feesHome: fill.feeEst ?? undefined,
+        quoteAsset: grid.quoteAsset,
+        homeAsset: grid.homeAsset,
+        orderId: fill.orderId,
+      });
+    }
     const nextPerf = applyFillToPerformance(perf, order, now);
     return nextPerf;
   } catch (error) {
@@ -652,7 +686,24 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
       const detail = await getOrder(grid.symbol, order.orderId);
       perf = applyFillToPerformance(perf, detail, now);
       const fill = extractGridFillRow(grid.symbol, detail, now);
-      if (fill) persistGridFill(fill);
+      if (fill) {
+        persistGridFill(fill);
+        persistTradeFill({
+          at: fill.at,
+          symbol: fill.symbol,
+          module: 'grid',
+          side: fill.side as 'BUY' | 'SELL',
+          qty: fill.executedQty,
+          price: fill.price ?? fill.notional / fill.executedQty,
+          notional: fill.notional,
+          feeAsset: undefined,
+          feeAmount: undefined,
+          feesHome: fill.feeEst ?? undefined,
+          quoteAsset: grid.quoteAsset,
+          homeAsset: grid.homeAsset,
+          orderId: fill.orderId,
+        });
+      }
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), symbol: grid.symbol, orderId: order.orderId }, 'Grid fill reconcile failed');
     }

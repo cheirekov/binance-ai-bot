@@ -20,7 +20,13 @@ import { applyAiTuning } from './aiTuning.js';
 import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
-import { persistDecision as persistDecisionSqlite, persistTrade as persistTradeSqlite } from './sqlite.js';
+import {
+  persistConversionEvent,
+  persistDecision as persistDecisionSqlite,
+  persistEquitySnapshot,
+  persistTrade as persistTradeSqlite,
+  persistTradeFill as persistTradeFillSqlite,
+} from './sqlite.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 import { sweepUnusedToHome } from './sweepUnused.js';
 
@@ -193,6 +199,184 @@ const extractExecutedAvgPrice = (order: unknown): number | null => {
   if (execQty > 0 && quoteQty > 0) return quoteQty / execQty;
 
   return null;
+};
+
+type ParsedFill = { qty: number; price: number; commission: number | null; commissionAsset: string | null; tradeId: string | null };
+
+const extractOrderId = (order: unknown): string | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  const raw = rec.orderId;
+  if (raw === undefined || raw === null) return null;
+  const str = String(raw);
+  return str && str !== 'undefined' ? str : null;
+};
+
+const extractOrderSide = (order: unknown): 'BUY' | 'SELL' | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  const side = String(rec.side ?? '').toUpperCase();
+  return side === 'BUY' || side === 'SELL' ? side : null;
+};
+
+const extractOrderFills = (order: unknown): ParsedFill[] => {
+  if (!order || typeof order !== 'object') return [];
+  const rec = order as Record<string, unknown>;
+  const fillsRaw = rec.fills;
+  if (!Array.isArray(fillsRaw) || !fillsRaw.length) return [];
+  const fills: ParsedFill[] = [];
+  for (const row of fillsRaw) {
+    if (!row || typeof row !== 'object') continue;
+    const f = row as Record<string, unknown>;
+    const qty = numberFromUnknown(f.qty ?? f.quantity) ?? 0;
+    const price = numberFromUnknown(f.price) ?? 0;
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    if (!Number.isFinite(price) || price <= 0) continue;
+    const commission = numberFromUnknown(f.commission);
+    const commissionAsset = typeof f.commissionAsset === 'string' ? f.commissionAsset.toUpperCase() : null;
+    const tradeId = f.tradeId !== undefined && f.tradeId !== null ? String(f.tradeId) : null;
+    fills.push({
+      qty,
+      price,
+      commission: commission !== null && Number.isFinite(commission) && commission >= 0 ? commission : null,
+      commissionAsset: commissionAsset && commissionAsset !== 'UNDEFINED' ? commissionAsset : null,
+      tradeId: tradeId && tradeId !== 'undefined' ? tradeId : null,
+    });
+  }
+  return fills;
+};
+
+const persistOrderFillsSqliteBestEffort = (params: {
+  at: number;
+  symbol: string;
+  module: 'portfolio' | 'grid';
+  order: unknown;
+  side?: 'BUY' | 'SELL';
+  quoteAsset?: string;
+  homeAsset?: string;
+  quoteToHome?: number;
+  feeRate?: number;
+}) => {
+  try {
+    const side = extractOrderSide(params.order) ?? params.side;
+    if (!side) return;
+
+    const orderId = extractOrderId(params.order);
+    const quoteAsset = params.quoteAsset?.toUpperCase();
+    const homeAsset = params.homeAsset?.toUpperCase();
+    const quoteToHome = Number.isFinite(params.quoteToHome) && (params.quoteToHome ?? 0) > 0 ? params.quoteToHome! : null;
+    const feeRate = Number.isFinite(params.feeRate) && (params.feeRate ?? 0) > 0 ? params.feeRate! : null;
+
+    const fills = extractOrderFills(params.order);
+    if (fills.length) {
+      const totalNotional = fills.reduce((sum, f) => sum + f.qty * f.price, 0);
+      for (const f of fills) {
+        const notional = f.qty * f.price;
+        if (!Number.isFinite(notional) || notional <= 0) continue;
+        let feesHome: number | null = null;
+        if (f.commission !== null && f.commissionAsset && homeAsset && f.commissionAsset === homeAsset) {
+          feesHome = f.commission;
+        } else if (f.commission !== null && f.commissionAsset && quoteAsset && quoteToHome && f.commissionAsset === quoteAsset) {
+          feesHome = f.commission * quoteToHome;
+        } else if (feeRate !== null && quoteToHome !== null) {
+          feesHome = notional * feeRate * quoteToHome;
+        }
+
+        persistTradeFillSqlite({
+          at: params.at,
+          symbol: params.symbol,
+          module: params.module,
+          side,
+          qty: f.qty,
+          price: f.price,
+          notional,
+          feeAsset: f.commissionAsset ?? undefined,
+          feeAmount: f.commission ?? undefined,
+          feesHome: feesHome ?? undefined,
+          quoteAsset,
+          homeAsset,
+          orderId: orderId ?? undefined,
+          tradeId: f.tradeId ?? undefined,
+        });
+      }
+      return;
+    }
+
+    const executedQty = extractExecutedQty(params.order) ?? 0;
+    if (!Number.isFinite(executedQty) || executedQty <= 0) return;
+    const quoteQty = extractCumulativeQuoteQty(params.order) ?? 0;
+    const avgPrice = extractExecutedAvgPrice(params.order) ?? (quoteQty > 0 ? quoteQty / executedQty : 0);
+    if (!Number.isFinite(avgPrice) || avgPrice <= 0) return;
+    const notional = quoteQty > 0 ? quoteQty : executedQty * avgPrice;
+    if (!Number.isFinite(notional) || notional <= 0) return;
+    const feesHome = feeRate !== null && quoteToHome !== null ? notional * feeRate * quoteToHome : null;
+
+    persistTradeFillSqlite({
+      at: params.at,
+      symbol: params.symbol,
+      module: params.module,
+      side,
+      qty: executedQty,
+      price: avgPrice,
+      notional,
+      feesHome: feesHome ?? undefined,
+      quoteAsset,
+      homeAsset,
+      orderId: orderId ?? undefined,
+    });
+  } catch {
+    // ignore
+  }
+};
+
+const persistConversionBestEffort = (params: {
+  at: number;
+  order: unknown;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  fromAsset: string;
+  toAsset: string;
+  homeAsset: string;
+}) => {
+  try {
+    const execQty = extractExecutedQty(params.order);
+    const quoteQty = extractCumulativeQuoteQty(params.order);
+    const fromQty = params.side === 'BUY' ? quoteQty : execQty;
+    const toQty = params.side === 'BUY' ? execQty : quoteQty;
+    const from = params.fromAsset.toUpperCase();
+    const to = params.toAsset.toUpperCase();
+    const home = params.homeAsset.toUpperCase();
+
+    const homeNotional = home === from ? fromQty : home === to ? toQty : null;
+    const feeEstHome = homeNotional && homeNotional > 0 ? homeNotional * feeRate.taker : null;
+    const slippageEstHome =
+      homeNotional && homeNotional > 0 ? homeNotional * (Math.max(0, config.slippageBps) / 10_000) : null;
+    const lossEstHome =
+      feeEstHome !== null && slippageEstHome !== null && feeEstHome >= 0 && slippageEstHome >= 0 ? feeEstHome + slippageEstHome : null;
+
+    const orderId =
+      params.order && typeof params.order === 'object' && 'orderId' in params.order
+        ? String((params.order as { orderId?: string | number }).orderId ?? '')
+        : undefined;
+
+    persistConversionEvent({
+      at: params.at,
+      symbol: params.symbol,
+      side: params.side,
+      fromAsset: from,
+      toAsset: to,
+      fromQty: fromQty ?? undefined,
+      toQty: toQty ?? undefined,
+      homeAsset: home,
+      homeNotional: homeNotional ?? undefined,
+      feeEstHome: feeEstHome ?? undefined,
+      slippageEstHome: slippageEstHome ?? undefined,
+      lossEstHome: lossEstHome ?? undefined,
+      orderId: orderId && orderId !== 'undefined' ? orderId : undefined,
+    });
+  } catch {
+    // ignore
+  }
 };
 
 const findSymbolInfo = (symbols: SymbolInfo[], symbol: string) =>
@@ -398,6 +582,7 @@ const updateEquityTelemetry = async () => {
         missingAssets: missingAssets.length ? missingAssets : undefined,
       },
     });
+    persistEquitySnapshot({ at: now, homeAsset: home, equityHome: totalHome, source: config.tradeVenue });
   } catch (error) {
     logger.warn({ err: errorToLogObject(error) }, 'Equity telemetry update failed');
   }
@@ -457,7 +642,8 @@ const ensureQuoteAsset = async (
   try {
     if (conversion.side === 'BUY') {
       const qty = missing * buffer;
-      await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'BUY', fromAsset: home, toAsset: quote, homeAsset: home });
     } else {
       const snap = await get24hStats(conversion.symbol);
       const qtyFrom = snap.price > 0 ? (missing / snap.price) * buffer : 0;
@@ -465,7 +651,8 @@ const ensureQuoteAsset = async (
       if (qtyFrom <= 0 || freeHome <= 0) {
         return { balances, note: `Insufficient ${home} to convert` };
       }
-      await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: Math.min(qtyFrom, freeHome), type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: Math.min(qtyFrom, freeHome), type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'SELL', fromAsset: home, toAsset: quote, homeAsset: home });
     }
     bumpConversionCounter();
     const refreshed = await refreshBalancesFromState();
@@ -499,12 +686,14 @@ const convertToHome = async (
   const buffer = 1 - config.slippageBps / 10000;
   try {
     if (conversion.side === 'SELL') {
-      await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: qtyFrom * buffer, type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: qtyFrom * buffer, type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'SELL', fromAsset: from, toAsset: home, homeAsset: home });
     } else {
       const snap = await get24hStats(conversion.symbol);
       const qtyHome = snap.price > 0 ? (qtyFrom / snap.price) * buffer : 0;
       if (qtyHome <= 0) return { balances, note: 'Conversion sizing failed' };
-      await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qtyHome, type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qtyHome, type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'BUY', fromAsset: from, toAsset: home, homeAsset: home });
     }
     bumpConversionCounter();
     const refreshed = await refreshBalancesFromState();
@@ -718,6 +907,17 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
       const exitAvg = extractExecutedAvgPrice(order) ?? priceForChecks;
       const entryAvg = position.executedAvgPrice ?? position.entryPrice;
       const quoteToHome = quoteAsset ? (await getAssetToHomeRate(symbols, quoteAsset, home)) ?? 1 : 1;
+      persistOrderFillsSqliteBestEffort({
+        at: closedAt,
+        symbol,
+        module: 'portfolio',
+        order,
+        side: position.side === 'BUY' ? 'SELL' : 'BUY',
+        quoteAsset,
+        homeAsset: home,
+        quoteToHome,
+        feeRate: feeRate.taker,
+      });
       const pnlQuote =
         position.side === 'BUY' ? (exitAvg - entryAvg) * adjustedQty : (entryAvg - exitAvg) * adjustedQty;
       const pnlHome = pnlQuote * quoteToHome;
@@ -786,6 +986,17 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
     const exitAvg = extractExecutedAvgPrice(order) ?? priceForChecks;
     const entryAvg = position.executedAvgPrice ?? position.entryPrice;
     const quoteToHome = quoteAsset ? (await getAssetToHomeRate(symbols, quoteAsset, home)) ?? 1 : 1;
+    persistOrderFillsSqliteBestEffort({
+      at: closedAt,
+      symbol,
+      module: 'portfolio',
+      order,
+      side: 'SELL',
+      quoteAsset,
+      homeAsset: home,
+      quoteToHome,
+      feeRate: feeRate.taker,
+    });
     const pnlQuote = position.side === 'BUY' ? (exitAvg - entryAvg) * adjustedQty : (entryAvg - exitAvg) * adjustedQty;
     const pnlHome = pnlQuote * quoteToHome;
     const entryFeeHome = adjustedQty * entryAvg * feeRate.taker * quoteToHome;
@@ -1307,6 +1518,17 @@ const portfolioTick = async (
     try {
       const order = await placeOrder({ symbol: candidate, side: entry.side, quantity: roundedQty, type: 'MARKET', price });
       persistLastTrade(persisted, key, now);
+      persistOrderFillsSqliteBestEffort({
+        at: now,
+        symbol: candidate,
+        module: 'portfolio',
+        order,
+        side: entry.side,
+        quoteAsset,
+        homeAsset: home,
+        quoteToHome,
+        feeRate: feeRate.taker,
+      });
 
       const executedQty = extractExecutedQty(order) ?? roundedQty;
       const executedAvgPrice = extractExecutedAvgPrice(order) ?? price;
@@ -1638,6 +1860,17 @@ const singleSymbolTick = async (
 
     const order = await placeOrder({ symbol: state.symbol, side: entry.side, quantity: adjustedQty, type: 'MARKET', price });
     persistLastTrade(persisted, key, now);
+    persistOrderFillsSqliteBestEffort({
+      at: now,
+      symbol: state.symbol,
+      module: 'portfolio',
+      order,
+      side: entry.side,
+      quoteAsset,
+      homeAsset: home,
+      quoteToHome,
+      feeRate: feeRate.taker,
+    });
 
     const executedQty = extractExecutedQty(order) ?? adjustedQty;
     const executedAvgPrice = extractExecutedAvgPrice(order) ?? price;

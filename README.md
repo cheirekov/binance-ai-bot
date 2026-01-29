@@ -10,7 +10,8 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Optional portfolio mode: multiple concurrent long positions, conversion to required quote assets, and “risk-off” return to `HOME_ASSET`.
 - Optional spot grid mode: auto-discovers range-bound candidates (heuristics) and maintains a limit-order grid (spot-only).
 - Optional AI policy (gated): LLM can propose OPEN/CLOSE/HOLD/PANIC and bounded parameter tuning; engine still validates and enforces caps.
-- Optional SQLite persistence for analytics/learning (features, decisions, trades, grid fills) stored under the Docker volume (`/app/data`).
+- Optional SQLite persistence for analytics/learning (features, decisions, trades, grid fills, equity snapshots, conversion events) stored under the Docker volume (`/app/data`).
+- PnL reconciliation: `/stats/pnl_reconcile` and a Portfolio “PnL breakdown” card help explain why grid performance is not equal to total account PnL.
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
 
 ## Quick start (local)
@@ -65,6 +66,7 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `POST /portfolio/sweep-unused` — `{ dryRun?, stopAutoTrade?, keepAllowedQuotes?, keepPositionAssets?, keepAssets? }` (sell unused free balances to `HOME_ASSET`)
 - `POST /ai-policy/apply-tuning` — `{ dryRun?: boolean }` (apply last AI policy tuning suggestion; persists to `state.json`)
 - `GET /stats/performance` — read-only performance stats (requires `PERSIST_TO_SQLITE=true`)
+- `GET /stats/pnl_reconcile?window=24h` — explainable PnL breakdown (equity change vs grid/portfolio realized+unrealized, fees, conversions, residual). Best with `PERSIST_TO_SQLITE=true`.
 - `GET /stats/db` — SQLite health (requires `PERSIST_TO_SQLITE=true`; returns table counts + last write timestamp)
 
 ## Notes and safety
@@ -79,6 +81,7 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
   - Mobile uses a sticky bottom navigation (Home/Portfolio/Orders/Strategy/Status); desktop uses top tabs.
 - `MIN_QUOTE_VOLUME` is enforced in `HOME_ASSET` terms (BTC/ETH quote volumes are converted using their `*HOME_ASSET` market).
 - `DAILY_LOSS_CAP_PCT` enables emergency stop when equity drawdown exceeds the threshold (PnL baseline resets daily).
+- `/stats/pnl_reconcile` is best-effort and may show a non-zero residual due to deposits/withdrawals, missing fills, or pricing gaps (it’s meant to make “grid PnL vs total account PnL” explainable).
 - News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages). Many sites (including Binance news pages) serve HTML and/or block server-side fetches.
 - Grid mode is **spot-only** and works best in sideways markets. In trends/breakouts it can accumulate losses; keep `GRID_MAX_ALLOC_PCT` small until you’re confident. Use `GRID_BREAKOUT_ACTION=cancel` to stop grids when price exits the range.
 - AI policy is **gated**: it can only choose actions/symbols from data the bot provides, and the engine still enforces exchange rules (minQty/minNotional), risk flags, allocation caps, and daily loss caps. It can still lose money—test on small size or testnet first.
