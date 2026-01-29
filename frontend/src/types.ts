@@ -95,6 +95,9 @@ export interface GridState {
   updatedAt: number;
   lastTickAt?: number;
   lastError?: string;
+  buyPaused?: boolean;
+  buyPauseReason?: string;
+  buyPausedAt?: number;
   ordersByLevel: Record<string, GridOrder>;
   performance?: GridPerformance;
 }

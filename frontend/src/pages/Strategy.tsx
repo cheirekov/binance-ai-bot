@@ -206,7 +206,10 @@ export const StrategyPage = (props: { data: StrategyResponse | null; selectedSym
                     {Object.values(props.data?.grids ?? {}).map((g) => (
                       <div key={g.symbol} className="candidate-row">
                         <span className="mono">{g.symbol}</span>
-                        <span className="muted">{g.status}</span>
+                        <span className="muted">
+                          {g.status}
+                          {g.buyPaused ? ` · Paused buys (${g.buyPauseReason ?? 'unknown'})` : ''}
+                        </span>
                       </div>
                     ))}
                   </div>

@@ -9,6 +9,9 @@ import { persistGridFill } from './sqlite.js';
 
 const persisted = getPersistedState();
 
+const liquidityResumeOkTicksBySymbol = new Map<string, number>();
+const LIQUIDITY_BUY_PAUSE_REASON = 'liquidity' as const;
+
 type SymbolInfo = Awaited<ReturnType<typeof fetchTradableSymbols>>[number];
 
 const stableLikeAssets = new Set([
@@ -402,6 +405,7 @@ const buildGridState = async (symbol: string, balances: Balance[], symbols: Symb
 
 const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: Balance[], currentPrice: number) => {
   if (!config.tradingEnabled) return { balances, grid };
+  if (grid.buyPaused) return { balances, grid };
   const base = grid.baseAsset.toUpperCase();
   const quote = grid.quoteAsset.toUpperCase();
   const freeBy = balanceFreeMap(balances);
@@ -529,6 +533,55 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     }
   }
 
+  const quoteVolume = Math.max(0, snap.quoteVolume ?? 0);
+  const liquidityFloor = Math.max(0, config.minQuoteVolume);
+  const liquidityHalted = quoteVolume < liquidityFloor;
+  const symbolKey = grid.symbol.toUpperCase();
+
+  if (config.gridBuyPauseOnLiquidityHalt) {
+    if (liquidityHalted) {
+      liquidityResumeOkTicksBySymbol.set(symbolKey, 0);
+      if (!grid.buyPaused) {
+        grid = {
+          ...grid,
+          buyPaused: true,
+          buyPauseReason: LIQUIDITY_BUY_PAUSE_REASON,
+          buyPausedAt: now,
+        };
+        persistGrid(persisted, grid.symbol, grid);
+        logger.warn(
+          { symbol: grid.symbol, quoteVolume, floor: liquidityFloor },
+          'Grid buys paused due to liquidity halt',
+        );
+      }
+    } else if (grid.buyPaused && grid.buyPauseReason === LIQUIDITY_BUY_PAUSE_REASON) {
+      const nextStreak = (liquidityResumeOkTicksBySymbol.get(symbolKey) ?? 0) + 1;
+      liquidityResumeOkTicksBySymbol.set(symbolKey, nextStreak);
+
+      const minElapsedMs = Math.max(0, config.gridLiquidityResumeMinutes) * 60_000;
+      const pausedAt = grid.buyPausedAt ?? now;
+      const elapsedOk = now - pausedAt >= minElapsedMs;
+      const requiredTicks = Math.max(1, Math.floor(config.gridLiquidityResumeTicks));
+
+      if (elapsedOk && nextStreak >= requiredTicks) {
+        grid = {
+          ...grid,
+          buyPaused: false,
+          buyPauseReason: undefined,
+          buyPausedAt: undefined,
+        };
+        liquidityResumeOkTicksBySymbol.delete(symbolKey);
+        persistGrid(persisted, grid.symbol, grid);
+        logger.info(
+          { symbol: grid.symbol, quoteVolume, floor: liquidityFloor },
+          'Grid buys resumed after liquidity recovery',
+        );
+      }
+    } else {
+      liquidityResumeOkTicksBySymbol.delete(symbolKey);
+    }
+  }
+
   // Bootstrap base inventory for neutral grids.
   const boot = await ensureBootstrapBase(grid, info, balances, current);
   balances = boot.balances;
@@ -543,6 +596,8 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   const openOrders = await getOpenOrders(grid.symbol);
   const openById = new Set<number>();
   const openBySideAndPrice = new Map<string, { orderId: number; qty: number }>();
+  const openBuyOrderIds: number[] = [];
+  const buyPaused = grid.buyPaused === true;
   for (const row of openOrders) {
     if (!row || typeof row !== 'object') continue;
     const rec = row as Record<string, unknown>;
@@ -552,9 +607,26 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     const origQty = Number(rec.origQty ?? rec.quantity ?? 0);
     if (!Number.isFinite(orderId) || orderId <= 0) continue;
     if (!Number.isFinite(price) || price <= 0) continue;
+    if (buyPaused && side === 'BUY') {
+      openBuyOrderIds.push(orderId);
+      continue;
+    }
     openById.add(orderId);
     const key = `${side}:${price.toFixed(decimalsForStep(info.tickSize))}`;
     openBySideAndPrice.set(key, { orderId, qty: origQty });
+  }
+
+  if (buyPaused && openBuyOrderIds.length && config.tradingEnabled) {
+    for (const orderId of openBuyOrderIds) {
+      try {
+        await cancelOrder(grid.symbol, orderId);
+      } catch (error) {
+        logger.warn(
+          { err: errorToLogObject(error), symbol: grid.symbol, orderId },
+          'Cancel open BUY order failed (liquidity buy-pause)',
+        );
+      }
+    }
   }
 
   // Drop stale orders we no longer see as open.
@@ -611,6 +683,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
 
     const side: 'BUY' | 'SELL' = levelPrice < current ? 'BUY' : 'SELL';
     const levelKey = String(i);
+    if (side === 'BUY' && grid.buyPaused) continue;
 
     // If we already track an open order for this level and it matches, keep it.
     const existing = nextOrdersByLevel[levelKey];
@@ -859,3 +932,7 @@ export const stopGrid = async (symbolInput: string) => {
   persistGrid(persisted, symbol, stopped);
   return { ok: true };
 };
+
+export const __test__ = {
+  reconcileGridOrders,
+} as const;
