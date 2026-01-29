@@ -40,6 +40,13 @@ export const PortfolioPage = (props: { data: StrategyResponse | null; loading: b
     return rows.sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0));
   }, [data?.positions]);
 
+  const runningGrids = useMemo(() => {
+    const grids = Object.values(data?.grids ?? {});
+    return grids
+      .filter((g) => (g.status ?? '').toLowerCase() === 'running')
+      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }, [data?.grids]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -231,6 +238,36 @@ export const PortfolioPage = (props: { data: StrategyResponse | null; loading: b
             ) : (
               <p className="muted">No trade history yet.</p>
             )}
+          </Card>
+        ) : null}
+
+        {runningGrids.length ? (
+          <Card eyebrow="Grid" title="Grid performance" subtitle="Estimates are derived from tracked grid fills and current price.">
+            <div className="stack">
+              {runningGrids.map((g) => {
+                const pnlHome = g.performance?.pnlHome ?? null;
+                const pnlPct = g.performance?.pnlPct ?? null;
+                const tone = pnlHome !== null ? (pnlHome >= 0 ? 'mono positive' : 'mono negative') : 'mono';
+                const home = g.homeAsset?.toUpperCase() ?? homeAsset ?? '';
+                const fillsBuy = g.performance?.fillsBuy;
+                const fillsSell = g.performance?.fillsSell;
+                const feesHome = g.performance?.feesHome;
+                return (
+                  <div key={g.symbol} className="candidate-row">
+                    <span className="mono">{g.symbol}</span>
+                    <span className={tone}>
+                      {pnlHome === null || pnlPct === null
+                        ? '—'
+                        : `${pnlHome >= 0 ? '+' : ''}${formatCompactNumber(pnlHome, { maxDecimals: 2 })}${home ? ` ${home}` : ''} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`}
+                      <span className="muted">
+                        {fillsBuy !== undefined && fillsSell !== undefined ? ` · fills ${fillsBuy}/${fillsSell}` : ''}
+                        {feesHome !== undefined ? ` · fees ${formatCompactNumber(feesHome, { maxDecimals: 2 })}${home ? ` ${home}` : ''}` : ''}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </Card>
         ) : null}
 

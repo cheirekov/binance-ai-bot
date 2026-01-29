@@ -9,7 +9,8 @@ import { OrderRow, StrategyResponse } from '../types';
 import { formatCompactNumber, formatOrderType, formatPrice } from '../utils/format';
 import { formatDateTimeShort } from '../utils/time';
 
-type OrdersView = 'open' | 'recent' | 'tracked';
+type OrdersView = 'open' | 'recent';
+type OrdersScope = 'tracked' | 'symbol';
 
 const orderTone = (o: OrderRow) => {
   const side = (o.side ?? '').toUpperCase();
@@ -21,6 +22,7 @@ const orderTone = (o: OrderRow) => {
 export const OrdersPage = (props: { data: StrategyResponse | null; selectedSymbol: string }) => {
   const toast = useToast();
   const [view, setView] = useState<OrdersView>('open');
+  const [scope, setScope] = useState<OrdersScope>('tracked');
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [loading, setLoading] = useState(false);
@@ -40,10 +42,7 @@ export const OrdersPage = (props: { data: StrategyResponse | null; selectedSymbo
         if (!res.ok) throw new Error('Failed to load order history');
         setRecentOrders(res.orders ?? []);
       } else {
-        const res =
-          view === 'tracked'
-            ? await fetchOpenOrders()
-            : await fetchOpenOrders({ symbol: props.selectedSymbol.toUpperCase() });
+        const res = scope === 'tracked' ? await fetchOpenOrders() : await fetchOpenOrders({ symbol: props.selectedSymbol.toUpperCase() });
         if (!res.ok) throw new Error('Failed to load open orders');
         setOpenOrders(res.openOrders ?? []);
       }
@@ -54,7 +53,7 @@ export const OrdersPage = (props: { data: StrategyResponse | null; selectedSymbo
     } finally {
       setLoading(false);
     }
-  }, [props.selectedSymbol, toast, view]);
+  }, [props.selectedSymbol, scope, toast, view]);
 
   useEffect(() => {
     void load();
@@ -68,7 +67,10 @@ export const OrdersPage = (props: { data: StrategyResponse | null; selectedSymbo
     const q = query.trim().toUpperCase();
     const st = statusFilter.trim().toUpperCase();
     return rows.filter((o) => {
-      if (q && !o.symbol.toUpperCase().includes(q)) return false;
+      if (q) {
+        const hay = `${o.symbol} ${(o.side ?? '').toUpperCase()} ${(o.status ?? '').toUpperCase()} ${String(o.orderId ?? '')}`.toUpperCase();
+        if (!hay.includes(q)) return false;
+      }
       if (st && (o.status ?? '').toUpperCase() !== st) return false;
       return true;
     });
@@ -161,11 +163,26 @@ export const OrdersPage = (props: { data: StrategyResponse | null; selectedSymbo
             options={[
               { value: 'open', label: 'Open' },
               { value: 'recent', label: 'Recent' },
-              { value: 'tracked', label: 'Tracked', badge: props.data?.positions ? Object.keys(props.data.positions).length : undefined },
             ]}
           />
+          {view === 'open' ? (
+            <SegmentedControl
+              value={scope}
+              onChange={setScope}
+              ariaLabel="Order scope"
+              options={[
+                { value: 'tracked', label: 'Tracked' },
+                { value: 'symbol', label: 'This symbol' },
+              ]}
+            />
+          ) : null}
           <div className="actions">
-            <input className="input" placeholder="Search symbol… (e.g. BTC)" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input
+              className="input"
+              placeholder="Search… (symbol, side, status, id)"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
             <select className="select small" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="">All statuses</option>
               {uniqueStatuses.map((s) => (
@@ -189,4 +206,3 @@ export const OrdersPage = (props: { data: StrategyResponse | null; selectedSymbo
     </div>
   );
 };
-

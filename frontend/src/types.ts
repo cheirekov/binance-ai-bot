@@ -298,3 +298,11 @@ export interface PerformanceStatsResponse {
   netPnlByDay: Array<{ day: string; netPnlHome: number; feesHome: number }>;
   lastErrorAt?: number | null;
 }
+
+export interface DbStatsResponse {
+  persistToSqlite: boolean;
+  sqliteFile?: string;
+  counts: { market_features: number; decisions: number; trades: number };
+  lastWriteAt: number | null;
+  lastError?: string;
+}

@@ -844,6 +844,10 @@ input {
 
 .modal {
   width: min(680px, 100%);
+  max-height: min(86dvh, 760px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: rgba(10, 13, 26, 0.98);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius);
@@ -870,7 +874,10 @@ input {
 }
 
 .modal-body {
+  flex: 1;
   padding: 14px 16px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .modal-actions {
@@ -967,6 +974,11 @@ input {
   font-size: 12px;
   line-height: 1.45;
   white-space: pre;
+}
+
+.modal-body pre {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 /* Risk flags */

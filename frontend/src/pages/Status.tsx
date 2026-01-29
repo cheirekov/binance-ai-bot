@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { executeTrade, panicLiquidate, setEmergencyStop, sweepUnused } from '../api';
+import { executeTrade, fetchDbStatsOptional, panicLiquidate, setEmergencyStop, sweepUnused } from '../api';
 import { Card } from '../components/ui/Card';
 import { Chip } from '../components/ui/Chip';
 import { Modal } from '../components/ui/Modal';
 import { useToast } from '../components/ui/Toast';
-import { StrategyResponse } from '../types';
+import { DbStatsResponse, StrategyResponse } from '../types';
 import { formatCompactNumber } from '../utils/format';
 import { readStorage, removeStorage, writeStorage } from '../utils/storage';
 import { formatAgo, formatDateTimeShort } from '../utils/time';
@@ -20,6 +20,8 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
   const toast = useToast();
   const [dangerOpen, setDangerOpen] = useState<null | 'panic' | 'sweep'>(null);
   const [dangerRunning, setDangerRunning] = useState(false);
+
+  const [dbHealth, setDbHealth] = useState<DbStatsResponse | null>(null);
 
   const [advancedMode, setAdvancedMode] = useState(() => (readStorage(ADVANCED_KEY) ?? 'false') === 'true');
   const [typed, setTyped] = useState('');
@@ -73,6 +75,21 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
       setTyped('');
     }
   }, [advancedMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const res = await fetchDbStatsOptional();
+      if (cancelled) return;
+      setDbHealth(res);
+    };
+    void load();
+    const interval = window.setInterval(() => void load(), 45_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   const tradingEnabled = !!props.data?.tradingEnabled;
   const autoTradeEnabled = !!props.data?.autoTradeEnabled;
@@ -249,6 +266,35 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
             </div>
           </details>
         </Card>
+
+        {dbHealth ? (
+          <Card
+            eyebrow="DB health"
+            title="SQLite"
+            subtitle={dbHealth.sqliteFile ? `File: ${dbHealth.sqliteFile}` : '—'}
+          >
+            <div className="kv-grid">
+              <div className="kv">
+                <div className="label">Status</div>
+                <div className="value">Enabled</div>
+                <div className="muted">{dbHealth.lastWriteAt ? `Last write ${formatAgo(dbHealth.lastWriteAt)}` : 'No writes yet'}</div>
+              </div>
+              <div className="kv">
+                <div className="label">market_features</div>
+                <div className="value">{dbHealth.counts.market_features}</div>
+              </div>
+              <div className="kv">
+                <div className="label">decisions</div>
+                <div className="value">{dbHealth.counts.decisions}</div>
+              </div>
+              <div className="kv">
+                <div className="label">trades</div>
+                <div className="value">{dbHealth.counts.trades}</div>
+              </div>
+            </div>
+            {dbHealth.lastError ? <p className="muted">Last error: {dbHealth.lastError}</p> : null}
+          </Card>
+        ) : null}
       </div>
 
       <div className="grid grid-2">

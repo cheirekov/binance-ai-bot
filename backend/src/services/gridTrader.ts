@@ -5,6 +5,7 @@ import { logger } from '../logger.js';
 import { Balance, GridOrder, GridState } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getPersistedState, persistGrid, persistMeta } from './persistence.js';
+import { persistGridFill } from './sqlite.js';
 
 const persisted = getPersistedState();
 
@@ -143,6 +144,39 @@ const applyFillToPerformance = (
   next.feesHome = clampNonNegative(next.feesHome + feeEst);
   next.lastFillAt = now;
   return next;
+};
+
+const extractGridFillRow = (symbol: string, order: unknown, now: number) => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  const status = String(rec.status ?? '').toUpperCase();
+  const side = String(rec.side ?? '').toUpperCase();
+  const type = String(rec.type ?? '').toUpperCase();
+  if (status !== 'FILLED' && status !== 'PARTIALLY_FILLED') return null;
+  if (side !== 'BUY' && side !== 'SELL') return null;
+
+  const executedQty = toNumber(rec.executedQty ?? rec.executedQuantity ?? rec.origQty) ?? 0;
+  if (!Number.isFinite(executedQty) || executedQty <= 0) return null;
+
+  const quoteQty = toNumber(rec.cummulativeQuoteQty ?? rec.cumulativeQuoteQty ?? rec.cumQuote ?? rec.cumQuoteQty) ?? 0;
+  const price = toNumber(rec.price) ?? null;
+  const notional = quoteQty > 0 ? quoteQty : executedQty * Math.max(price ?? 0, 0.00000001);
+  if (!Number.isFinite(notional) || notional <= 0) return null;
+
+  const feeEst = notional * (type === 'MARKET' ? feeRate.taker : feeRate.maker);
+  const orderId = rec.orderId !== undefined ? String(rec.orderId) : undefined;
+  const normalizedPrice = price && price > 0 ? price : notional / executedQty;
+
+  return {
+    at: now,
+    symbol: symbol.toUpperCase(),
+    side,
+    executedQty,
+    notional,
+    feeEst,
+    price: normalizedPrice,
+    orderId,
+  };
 };
 
 const revaluePerformance = (perf: NonNullable<GridState['performance']>, now: number, price: number) => {
@@ -392,6 +426,8 @@ const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: 
   try {
     const order = await placeOrder({ symbol: grid.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
     const now = Date.now();
+    const fill = extractGridFillRow(grid.symbol, order, now);
+    if (fill) persistGridFill(fill);
     const perf = ensurePerformance(grid, now);
     const nextPerf = applyFillToPerformance(perf, order, now);
     grid = { ...grid, performance: nextPerf };
@@ -445,6 +481,8 @@ const liquidateGridBaseToHome = async (
 
   try {
     const order = await placeOrder({ symbol: grid.symbol, side: 'SELL', quantity: qty, type: 'MARKET' });
+    const fill = extractGridFillRow(grid.symbol, order, now);
+    if (fill) persistGridFill(fill);
     const nextPerf = applyFillToPerformance(perf, order, now);
     return nextPerf;
   } catch (error) {
@@ -541,6 +579,8 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     try {
       const detail = await getOrder(grid.symbol, order.orderId);
       perf = applyFillToPerformance(perf, detail, now);
+      const fill = extractGridFillRow(grid.symbol, detail, now);
+      if (fill) persistGridFill(fill);
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), symbol: grid.symbol, orderId: order.orderId }, 'Grid fill reconcile failed');
     }

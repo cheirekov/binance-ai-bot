@@ -26,9 +26,21 @@ export type BotState = {
 const mergeSymbols = (payload: StrategyResponse): string[] => {
   const current = payload.symbol;
   const list = payload.availableSymbols ?? [];
-  if (!current) return list;
-  if (list.includes(current)) return list;
-  return [current, ...list];
+  const grids = Object.keys(payload.grids ?? {});
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (s?: string | null) => {
+    const upper = (s ?? '').toUpperCase();
+    if (!upper || seen.has(upper)) return;
+    seen.add(upper);
+    out.push(upper);
+  };
+
+  push(current);
+  for (const s of list) push(s);
+  for (const s of grids) push(s);
+  return out;
 };
 
 const getHttpStatus = (err: unknown): number | undefined => {

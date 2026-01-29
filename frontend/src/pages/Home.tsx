@@ -12,6 +12,9 @@ import { formatAgo, formatTime } from '../utils/time';
 
 type HomeEvent = { at: number; text: string };
 
+const PRICE_MOVE_THRESHOLD_PCT = 0.25;
+const PRICE_MOVE_BASELINE_RESET_PCT = 50;
+
 const deriveRegime = (data: StrategyResponse | null): 'TREND' | 'RANGE' | 'NEUTRAL' | null => {
   const signals = data?.strategies?.short?.signalsUsed ?? [];
   const hit = signals.find((s) => s.toUpperCase().startsWith('REGIME '));
@@ -116,13 +119,25 @@ export const HomePage = (props: {
 
     const nextEvents: HomeEvent[] = [];
 
-    // price move
-    const p0 = prev.market?.price;
-    const p1 = next.market?.price;
-    if (typeof p0 === 'number' && typeof p1 === 'number' && p0 > 0 && p1 > 0) {
-      const pct = ((p1 - p0) / p0) * 100;
-      const absPct = Math.abs(pct);
-      if (absPct >= 0.25) nextEvents.push({ at: Date.now(), text: `Price moved ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` });
+    const prevSymbol = (prev.symbol ?? '').toUpperCase();
+    const nextSymbol = (next.symbol ?? '').toUpperCase();
+    const symbolChanged = !!prevSymbol && !!nextSymbol && prevSymbol !== nextSymbol;
+
+    if (symbolChanged) {
+      nextEvents.push({ at: Date.now(), text: `Active symbol changed: ${prevSymbol} → ${nextSymbol}` });
+    } else {
+      // price move (symbol-aware)
+      const p0 = prev.market?.price;
+      const p1 = next.market?.price;
+      if (typeof p0 === 'number' && typeof p1 === 'number' && p0 > 0 && p1 > 0) {
+        const pct = ((p1 - p0) / p0) * 100;
+        const absPct = Math.abs(pct);
+        if (absPct > PRICE_MOVE_BASELINE_RESET_PCT) {
+          nextEvents.push({ at: Date.now(), text: `Price baseline reset (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)` });
+        } else if (absPct >= PRICE_MOVE_THRESHOLD_PCT) {
+          nextEvents.push({ at: Date.now(), text: `Price moved ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` });
+        }
+      }
     }
 
     // regime change

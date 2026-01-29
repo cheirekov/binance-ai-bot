@@ -21,10 +21,13 @@ type QueuedWrite = (db: SqliteDb) => void;
 
 let db: SqliteDb | null = null;
 let lastOpenErrorAt: number | null = null;
+let lastOpenError: string | null = null;
 let openDisabledUntil: number | null = null;
 
 const queue: QueuedWrite[] = [];
 let flushScheduled = false;
+let lastWriteAt: number | null = null;
+let lastWriteError: string | null = null;
 
 const MAX_QUEUE = 2_000;
 const FLUSH_BATCH = 200;
@@ -100,6 +103,21 @@ const initSchema = (db: SqliteDb) => {
 
     CREATE INDEX IF NOT EXISTS idx_trades_event_at
       ON trades(event, at);
+
+    CREATE TABLE IF NOT EXISTS grid_fills (
+      id INTEGER PRIMARY KEY,
+      at INTEGER NOT NULL,
+      symbol TEXT NOT NULL,
+      side TEXT NOT NULL,
+      executedQty REAL NOT NULL,
+      notional REAL NOT NULL,
+      feeEst REAL,
+      price REAL,
+      orderId TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_grid_fills_symbol_at
+      ON grid_fills(symbol, at);
   `);
 };
 
@@ -115,10 +133,12 @@ const openDb = (): SqliteDb | null => {
     const next = new Database(config.sqlitePath);
     initSchema(next);
     lastOpenErrorAt = null;
+    lastOpenError = null;
     openDisabledUntil = null;
     return next;
   } catch (error) {
     lastOpenErrorAt = now;
+    lastOpenError = error instanceof Error ? error.message.slice(0, 180) : 'Unknown error';
     // Back off briefly to avoid spamming logs if the filesystem is unwritable.
     openDisabledUntil = now + 30_000;
     logger.warn({ err: errorToLogObject(error) }, 'SQLite: failed to open (disabled temporarily)');
@@ -159,7 +179,10 @@ const flushQueue = () => {
         for (const w of writes) w(active);
       });
       tx(batch);
+      lastWriteAt = Date.now();
+      lastWriteError = null;
     } catch (error) {
+      lastWriteError = error instanceof Error ? error.message.slice(0, 180) : 'Write batch failed';
       logger.warn({ err: errorToLogObject(error) }, 'SQLite: write batch failed (dropping batch)');
     }
   }
@@ -266,6 +289,33 @@ export const persistTrade = (row: {
     ).run({
       ...row,
       symbol: row.symbol.toUpperCase(),
+      orderId: row.orderId !== undefined ? String(row.orderId) : null,
+    });
+  });
+};
+
+export const persistGridFill = (row: {
+  at: number;
+  symbol: string;
+  side: string;
+  executedQty: number;
+  notional: number;
+  feeEst?: number;
+  price?: number;
+  orderId?: string | number;
+}) => {
+  enqueueWrite((db) => {
+    db.prepare(
+      `INSERT INTO grid_fills (at, symbol, side, executedQty, notional, feeEst, price, orderId)
+       VALUES (@at, @symbol, @side, @executedQty, @notional, @feeEst, @price, @orderId)`,
+    ).run({
+      at: row.at,
+      symbol: row.symbol.toUpperCase(),
+      side: String(row.side ?? '').toUpperCase(),
+      executedQty: row.executedQty,
+      notional: row.notional,
+      feeEst: row.feeEst ?? null,
+      price: row.price ?? null,
       orderId: row.orderId !== undefined ? String(row.orderId) : null,
     });
   });
@@ -397,5 +447,42 @@ export const getPerformanceStats = (): {
       netPnlByDay: [],
       lastErrorAt: lastOpenErrorAt,
     };
+  }
+};
+
+export const getDbHealth = (): {
+  persistToSqlite: boolean;
+  sqliteFile?: string;
+  counts: { market_features: number; decisions: number; trades: number };
+  lastWriteAt: number | null;
+  lastError?: string;
+} => {
+  const sqliteFile = config.sqlitePath ? path.basename(config.sqlitePath) : undefined;
+  const base = {
+    persistToSqlite: !!config.persistToSqlite,
+    sqliteFile,
+    counts: { market_features: 0, decisions: 0, trades: 0 },
+    lastWriteAt,
+  };
+
+  if (!config.persistToSqlite) return base;
+
+  const active = ensureDb();
+  if (!active) {
+    const lastError = lastWriteError ?? lastOpenError ?? (lastOpenErrorAt ? 'SQLite unavailable' : null);
+    return lastError ? { ...base, lastError } : base;
+  }
+
+  try {
+    const market_features = Number(active.prepare(`SELECT COUNT(*) as n FROM market_features`).get()?.n ?? 0);
+    const decisions = Number(active.prepare(`SELECT COUNT(*) as n FROM decisions`).get()?.n ?? 0);
+    const trades = Number(active.prepare(`SELECT COUNT(*) as n FROM trades`).get()?.n ?? 0);
+    const lastError = lastWriteError ?? lastOpenError ?? null;
+    return lastError
+      ? { ...base, counts: { market_features, decisions, trades }, lastError }
+      : { ...base, counts: { market_features, decisions, trades } };
+  } catch (error) {
+    const lastError = (error instanceof Error ? error.message.slice(0, 180) : 'SQLite stats failed') ?? 'SQLite stats failed';
+    return { ...base, lastError };
   }
 };
