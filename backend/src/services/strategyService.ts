@@ -369,6 +369,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     positions: positionsForVenue,
     grids: persisted.grids ?? {},
     equity: persisted.meta?.equity,
+    riskGovernor: persisted.meta?.riskGovernor?.decision ?? null,
     lastUpdated: state.lastUpdated,
     error: state.error,
     riskFlags: state.riskFlags,

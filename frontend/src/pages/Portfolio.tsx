@@ -351,14 +351,17 @@ export const PortfolioPage = (props: { data: StrategyResponse | null; loading: b
                 const fillsBuy = g.performance?.fillsBuy;
                 const fillsSell = g.performance?.fillsSell;
                 const feesHome = g.performance?.feesHome;
+                const paused = !!g.buyPaused;
+                const pauseReason = g.buyPauseReason ?? 'unknown';
                 return (
-                  <div key={g.symbol} className="candidate-row">
+                  <div key={g.symbol} className="candidate-row" title={paused ? `Grid buys paused: ${pauseReason}` : undefined}>
                     <span className="mono">{g.symbol}</span>
                     <span className={tone}>
                       {pnlHome === null || pnlPct === null
                         ? '—'
                         : `${pnlHome >= 0 ? '+' : ''}${formatCompactNumber(pnlHome, { maxDecimals: 2 })}${home ? ` ${home}` : ''} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`}
                       <span className="muted">
+                        {paused ? ` · buys paused (${pauseReason})` : ''}
                         {fillsBuy !== undefined && fillsSell !== undefined ? ` · fills ${fillsBuy}/${fillsSell}` : ''}
                         {feesHome !== undefined ? ` · fees ${formatCompactNumber(feesHome, { maxDecimals: 2 })}${home ? ` ${home}` : ''}` : ''}
                       </span>

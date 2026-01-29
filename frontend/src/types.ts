@@ -23,6 +23,18 @@ export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
 export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
 
+export type RiskGovernorState = 'NORMAL' | 'CAUTION' | 'HALT';
+
+export type RiskGovernorReasonCode = 'drawdown_daily' | 'drawdown_rolling' | 'trend' | 'fee_burn' | 'vol_spike' | 'manual';
+
+export interface RiskGovernorDecision {
+  state: RiskGovernorState;
+  since: number;
+  reasons: Array<{ code: RiskGovernorReasonCode; detail: string }>;
+  entriesPaused: boolean;
+  gridBuyPausedGlobal: boolean;
+}
+
 export interface AiPolicyTuning {
   minQuoteVolume?: number;
   maxVolatilityPercent?: number;
@@ -211,6 +223,7 @@ export interface StrategyResponse {
     pnlPct: number;
     missingAssets?: string[];
   };
+  riskGovernor?: RiskGovernorDecision | null;
   lastUpdated: number | null;
   error?: string;
   riskFlags?: string[];

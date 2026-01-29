@@ -97,6 +97,7 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
   const tradeHalted = !!props.data?.tradeHalted;
   const venue = props.data?.tradeVenue ?? 'spot';
   const quoteAsset = (props.data?.market?.quoteAsset ?? props.data?.quoteAsset)?.toUpperCase() ?? '';
+  const governor = props.data?.riskGovernor ?? null;
 
   const expectedTyped = useMemo(() => {
     if (!manualSide) return null;
@@ -227,6 +228,46 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
       </div>
 
       <div className="grid grid-2">
+        <Card
+          eyebrow="Risk Governor"
+          title={governor?.state ?? '—'}
+          subtitle={governor?.since ? `Since ${formatDateTimeShort(governor.since)} (${formatAgo(governor.since)})` : '—'}
+        >
+          {governor ? (
+            <>
+              <div className="chip-row">
+                <Chip tone={governor.state === 'HALT' ? 'danger' : governor.state === 'CAUTION' ? 'warn' : 'good'}>
+                  State: {governor.state}
+                </Chip>
+                <Chip tone={governor.entriesPaused ? 'warn' : 'neutral'}>Entries: {governor.entriesPaused ? 'Paused' : 'Allowed'}</Chip>
+                <Chip tone={governor.gridBuyPausedGlobal ? 'warn' : 'neutral'}>
+                  Grid buys: {governor.gridBuyPausedGlobal ? 'Paused' : 'Allowed'}
+                </Chip>
+              </div>
+
+              {governor.reasons?.length ? (
+                <>
+                  <div className="divider" />
+                  <div className="label">Top reasons</div>
+                  <ul className="bullets">
+                    {governor.reasons.slice(0, 4).map((r, idx) => (
+                      <li key={`${r.code}:${idx}`}>
+                        <span className="mono">{r.code}</span>
+                        {r.detail ? ` · ${r.detail}` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="muted">No reasons reported.</p>
+              )}
+            </>
+          ) : (
+            <p className="muted">Governor status unavailable (backend may be older or not initialized yet).</p>
+          )}
+          <p className="muted">Governor decisions are computed from live balances + tickers and in-memory state (not SQLite).</p>
+        </Card>
+
         <Card eyebrow="Risk & limits" title="What constrains the bot">
           <div className="kv-grid">
             <div className="kv">

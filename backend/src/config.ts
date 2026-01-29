@@ -174,6 +174,29 @@ export const config = {
   gridBuyPauseOnLiquidityHalt: boolFromEnv(process.env.GRID_BUY_PAUSE_ON_LIQUIDITY_HALT, true),
   gridLiquidityResumeTicks: Math.max(1, Math.floor(numberFromEnv(process.env.LIQUIDITY_RESUME_TICKS, 3))),
   gridLiquidityResumeMinutes: Math.max(0, numberFromEnv(process.env.LIQUIDITY_RESUME_MINUTES, 5)),
+
+  // Risk Governor (safe defaults; risk-off bias)
+  riskGovernorEnabled: boolFromEnv(process.env.RISK_GOVERNOR_ENABLED, true),
+  riskWindowMinutes: Math.max(30, Math.floor(numberFromEnv(process.env.RISK_WINDOW_MINUTES, 360))),
+  riskDrawdownCautionPct: Math.max(0, numberFromEnv(process.env.RISK_DRAWDOWN_CAUTION_PCT, 1.0)),
+  riskDrawdownHaltPct: Math.max(0, numberFromEnv(process.env.RISK_DRAWDOWN_HALT_PCT, 2.0)),
+  riskFeeBurnCautionPct: Math.max(0, numberFromEnv(process.env.RISK_FEE_BURN_CAUTION_PCT, 0.2)),
+  riskFeeBurnHaltPct: Math.max(0, numberFromEnv(process.env.RISK_FEE_BURN_HALT_PCT, 0.4)),
+  riskTrendAdxOn: Math.max(0, numberFromEnv(process.env.RISK_TREND_ADX_ON, 25)),
+  riskTrendAdxOff: Math.max(0, numberFromEnv(process.env.RISK_TREND_ADX_OFF, 18)),
+  riskMinStateSeconds: Math.max(0, Math.floor(numberFromEnv(process.env.RISK_MIN_STATE_SECONDS, 300))),
+  riskHaltMinSeconds: Math.max(0, Math.floor(numberFromEnv(process.env.RISK_HALT_MIN_SECONDS, 600))),
+  riskHaltMarketExit: boolFromEnv(process.env.RISK_HALT_MARKET_EXIT, false),
+  riskHaltCancelAllOrders: boolFromEnv(process.env.RISK_HALT_CANCEL_ALL_ORDERS, false),
+
+  // Grid Guard (per-symbol grid BUY pause/resume in bad regimes; SELLs stay active)
+  gridGuardEnabled: boolFromEnv(process.env.GRID_GUARD_ENABLED, true),
+  gridBreakdownPct: Math.max(0, numberFromEnv(process.env.GRID_BREAKDOWN_PCT, 1.0)),
+  gridBreakdownTicks: Math.max(1, Math.floor(numberFromEnv(process.env.GRID_BREAKDOWN_TICKS, 3))),
+  gridAtrPctMax: Math.max(0, numberFromEnv(process.env.GRID_ATR_PCT_MAX, 6.0)),
+  gridResumeTicks: Math.max(1, Math.floor(numberFromEnv(process.env.GRID_RESUME_TICKS, 3))),
+  gridResumeMinutes: Math.max(0, numberFromEnv(process.env.GRID_RESUME_MINUTES, 5)),
+
   aiPolicyMode: oneOf(process.env.AI_POLICY_MODE, ['off', 'advisory', 'gated-live'] as const, 'off'),
   aiPolicyModel: optionalStringFromEnv(process.env.AI_POLICY_MODEL) || optionalStringFromEnv(process.env.OPENAI_MODEL) || 'gpt-4.1-mini',
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),

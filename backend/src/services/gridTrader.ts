@@ -2,15 +2,25 @@ import { cancelOrder, get24hStats, getBalances, getKlines, getOpenOrders, getOrd
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
+import { fetchIndicatorSnapshot } from '../strategy/indicators.js';
 import { Balance, GridOrder, GridState } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getPersistedState, persistGrid, persistMeta } from './persistence.js';
+import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
 import { persistGridFill, persistTradeFill } from './sqlite.js';
 
 const persisted = getPersistedState();
 
 const liquidityResumeOkTicksBySymbol = new Map<string, number>();
 const LIQUIDITY_BUY_PAUSE_REASON = 'liquidity' as const;
+
+const GOVERNOR_BUY_PAUSE_REASON = 'governor' as const;
+const GRID_GUARD_TREND_REASON = 'trend' as const;
+const GRID_GUARD_BREAKDOWN_REASON = 'breakdown' as const;
+const GRID_GUARD_VOL_SPIKE_REASON = 'vol_spike' as const;
+
+const gridGuardBreakdownTicksBySymbol = new Map<string, number>();
+const gridGuardResumeOkTicksBySymbol = new Map<string, number>();
 
 type SymbolInfo = Awaited<ReturnType<typeof fetchTradableSymbols>>[number];
 
@@ -270,6 +280,31 @@ const scoreGridCandidate = (snap: Awaited<ReturnType<typeof get24hStats>>, range
   return liquidityScore * range.rangePct * regimeScore;
 };
 
+const getRiskGovernor = () => persisted.meta?.riskGovernor?.decision ?? null;
+
+const computeGridGuardSignals = async (symbol: string) => {
+  // Use 1h as a stable regime timeframe for grids.
+  try {
+    const ind = await fetchIndicatorSnapshot(symbol, '1h', 200);
+    const price = ind.close;
+    const atr = ind.atr14;
+    const adx = ind.adx14;
+    const bb = ind.bb20;
+
+    const atrPct = atr && price > 0 ? (atr / price) * 100 : null;
+
+    return {
+      ok: true as const,
+      adx: adx ?? null,
+      atrPct,
+      bbLower: bb.lower ?? null,
+      bbUpper: bb.upper ?? null,
+    };
+  } catch {
+    return { ok: false as const };
+  }
+};
+
 export const refreshGridCandidates = async () => {
   if (config.tradeVenue !== 'spot') return { best: null as string | null, candidates: [] as { symbol: string; score: number }[] };
   if (!config.gridEnabled) return { best: null as string | null, candidates: [] as { symbol: string; score: number }[] };
@@ -448,6 +483,7 @@ const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: 
         homeAsset: grid.homeAsset,
         orderId: fill.orderId,
       });
+      recordFeeTelemetryBestEffort({ at: fill.at, feesHome: fill.feeEst ?? null, notionalHome: fill.notional ?? null, fills: 1 });
     }
     const perf = ensurePerformance(grid, now);
     const nextPerf = applyFillToPerformance(perf, order, now);
@@ -520,6 +556,7 @@ const liquidateGridBaseToHome = async (
         homeAsset: grid.homeAsset,
         orderId: fill.orderId,
       });
+      recordFeeTelemetryBestEffort({ at: fill.at, feesHome: fill.feeEst ?? null, notionalHome: fill.notional ?? null, fills: 1 });
     }
     const nextPerf = applyFillToPerformance(perf, order, now);
     return nextPerf;
@@ -613,6 +650,93 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
       }
     } else {
       liquidityResumeOkTicksBySymbol.delete(symbolKey);
+    }
+  }
+
+  // Risk Governor global grid BUY pause (safe: cancel BUYs only; keep SELLs to unwind).
+  const governor = getRiskGovernor();
+  const globalBuyPaused = governor?.gridBuyPausedGlobal === true;
+
+  if (globalBuyPaused) {
+    gridGuardResumeOkTicksBySymbol.set(symbolKey, 0);
+    gridGuardBreakdownTicksBySymbol.set(symbolKey, 0);
+    if (!grid.buyPaused || grid.buyPauseReason !== GOVERNOR_BUY_PAUSE_REASON) {
+      grid = { ...grid, buyPaused: true, buyPauseReason: GOVERNOR_BUY_PAUSE_REASON, buyPausedAt: now };
+      persistGrid(persisted, grid.symbol, grid);
+      logger.warn({ symbol: grid.symbol, state: governor?.state }, 'Grid buys paused by Risk Governor');
+    }
+  } else if (grid.buyPaused && grid.buyPauseReason === GOVERNOR_BUY_PAUSE_REASON) {
+    // Governor has released the global pause; allow normal grid guard logic to decide.
+    grid = { ...grid, buyPaused: false, buyPauseReason: undefined, buyPausedAt: undefined };
+    persistGrid(persisted, grid.symbol, grid);
+    logger.info({ symbol: grid.symbol }, 'Grid buys resumed after Risk Governor release');
+  }
+
+  // Grid Guard: pause BUY legs in trend/falling-knife/vol spike regimes (SELLs stay active).
+  if (config.gridGuardEnabled && !globalBuyPaused) {
+    const guard = await computeGridGuardSignals(grid.symbol);
+    const adx = guard.ok ? (guard.adx ?? null) : null;
+    const atrPct = guard.ok ? (guard.atrPct ?? null) : null;
+    const bbLower = guard.ok ? (guard.bbLower ?? null) : null;
+    const bbUpper = guard.ok ? (guard.bbUpper ?? null) : null;
+
+    const adxOn = Math.max(0, config.riskTrendAdxOn);
+    const adxOff = Math.max(0, config.riskTrendAdxOff);
+
+    const trendBad = adx !== null && Number.isFinite(adx) && adx >= adxOn;
+    const volBad = atrPct !== null && Number.isFinite(atrPct) && atrPct >= Math.max(0, config.gridAtrPctMax);
+
+    const breakdownFloor =
+      bbLower !== null && Number.isFinite(bbLower) && bbLower > 0
+        ? bbLower * (1 - Math.max(0, config.gridBreakdownPct) / 100)
+        : null;
+    const isBreakdownTick = breakdownFloor !== null && current < breakdownFloor;
+
+    const breakdownStreak = isBreakdownTick ? (gridGuardBreakdownTicksBySymbol.get(symbolKey) ?? 0) + 1 : 0;
+    gridGuardBreakdownTicksBySymbol.set(symbolKey, breakdownStreak);
+
+    const breakdownBad = breakdownStreak >= Math.max(1, Math.floor(config.gridBreakdownTicks));
+
+    const badReason = trendBad
+      ? GRID_GUARD_TREND_REASON
+      : breakdownBad
+        ? GRID_GUARD_BREAKDOWN_REASON
+        : volBad
+          ? GRID_GUARD_VOL_SPIKE_REASON
+          : null;
+
+    if (badReason && grid.buyPauseReason !== LIQUIDITY_BUY_PAUSE_REASON) {
+      gridGuardResumeOkTicksBySymbol.set(symbolKey, 0);
+      if (!grid.buyPaused || grid.buyPauseReason !== badReason) {
+        grid = { ...grid, buyPaused: true, buyPauseReason: badReason, buyPausedAt: now };
+        persistGrid(persisted, grid.symbol, grid);
+        logger.warn({ symbol: grid.symbol, reason: badReason, adx, atrPct, bbLower }, 'Grid Guard paused BUYs');
+      }
+    } else if (
+      grid.buyPaused &&
+      (grid.buyPauseReason === GRID_GUARD_TREND_REASON ||
+        grid.buyPauseReason === GRID_GUARD_BREAKDOWN_REASON ||
+        grid.buyPauseReason === GRID_GUARD_VOL_SPIKE_REASON)
+    ) {
+      const minElapsedMs = Math.max(0, config.gridResumeMinutes) * 60_000;
+      const pausedAt = grid.buyPausedAt ?? now;
+      const elapsedOk = now - pausedAt >= minElapsedMs;
+
+      const reenteredBand =
+        bbLower !== null && bbUpper !== null && Number.isFinite(bbLower) && Number.isFinite(bbUpper) ? current >= bbLower && current <= bbUpper : false;
+      const trendCleared = adx !== null && Number.isFinite(adx) ? adx <= adxOff : false;
+
+      const resumeOk = reenteredBand && trendCleared && !volBad;
+      const nextResumeStreak = resumeOk ? (gridGuardResumeOkTicksBySymbol.get(symbolKey) ?? 0) + 1 : 0;
+      gridGuardResumeOkTicksBySymbol.set(symbolKey, nextResumeStreak);
+
+      if (elapsedOk && nextResumeStreak >= Math.max(1, Math.floor(config.gridResumeTicks))) {
+        grid = { ...grid, buyPaused: false, buyPauseReason: undefined, buyPausedAt: undefined };
+        gridGuardResumeOkTicksBySymbol.delete(symbolKey);
+        gridGuardBreakdownTicksBySymbol.delete(symbolKey);
+        persistGrid(persisted, grid.symbol, grid);
+        logger.info({ symbol: grid.symbol }, 'Grid Guard resumed BUYs');
+      }
     }
   }
 
@@ -823,6 +947,9 @@ export const startOrSyncGrids = async () => {
   if (!config.gridEnabled) return;
   if (config.tradeVenue !== 'spot') return;
 
+  const governor = getRiskGovernor();
+  const allowNewGrids = governor?.state === undefined || governor?.state === 'NORMAL';
+
   const now = Date.now();
   const last = persisted.meta?.gridRebalanceAt ?? 0;
   if (now - last < config.gridRebalanceSeconds * 1000) return;
@@ -860,7 +987,7 @@ export const startOrSyncGrids = async () => {
 
   // Ensure we have at most GRID_MAX_ACTIVE_GRIDS running grids.
   const runningSymbols = new Set(existing.map((g) => g.symbol.toUpperCase()));
-  const toStart = desiredSymbols.filter((s) => !runningSymbols.has(s) && !stoppedSymbols.has(s));
+  const toStart = allowNewGrids ? desiredSymbols.filter((s) => !runningSymbols.has(s) && !stoppedSymbols.has(s)) : [];
 
   const allocated = existing.reduce((sum, g) => sum + (g.allocationHome ?? 0), 0);
   const remaining = Math.max(0, maxAllocHome - allocated);

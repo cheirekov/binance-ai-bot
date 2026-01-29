@@ -17,6 +17,7 @@ import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { runAiPolicy } from './aiPolicy.js';
 import { applyAiTuning } from './aiTuning.js';
+import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
 import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
@@ -102,6 +103,48 @@ const actionFromCloseNote = (note?: string): AutoTradeDecision['action'] => {
 };
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
+
+const getRiskGovernorDecision = () => persisted.meta?.riskGovernor?.decision ?? null;
+
+const isRiskTighteningTune = (tune: Record<string, unknown> | undefined | null) => {
+  if (!tune) return true;
+  const gov = getRiskGovernorDecision();
+  if (!gov || gov.state === 'NORMAL') return true;
+
+  // Under CAUTION/HALT: allow only risk tightening (never relaxation).
+  // Tightening rules:
+  // - minQuoteVolume: can increase only
+  // - maxVolatilityPercent: can decrease only
+  // - portfolioMaxAllocPct / gridMaxAllocPct: can decrease only
+  // - portfolioMaxPositions: can decrease only
+  // - autoTradeHorizon: do not change (neutral but can change behavior)
+  const asNum = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : Number.NaN);
+
+  if ('autoTradeHorizon' in tune) return false;
+
+  if ('minQuoteVolume' in tune) {
+    const next = asNum((tune as Record<string, unknown>).minQuoteVolume);
+    if (Number.isFinite(next) && next < config.minQuoteVolume) return false;
+  }
+  if ('maxVolatilityPercent' in tune) {
+    const next = asNum((tune as Record<string, unknown>).maxVolatilityPercent);
+    if (Number.isFinite(next) && next > config.maxVolatilityPercent) return false;
+  }
+  if ('portfolioMaxAllocPct' in tune) {
+    const next = asNum((tune as Record<string, unknown>).portfolioMaxAllocPct);
+    if (Number.isFinite(next) && next > config.portfolioMaxAllocPct) return false;
+  }
+  if ('portfolioMaxPositions' in tune) {
+    const next = asNum((tune as Record<string, unknown>).portfolioMaxPositions);
+    if (Number.isFinite(next) && next > config.portfolioMaxPositions) return false;
+  }
+  if ('gridMaxAllocPct' in tune) {
+    const next = asNum((tune as Record<string, unknown>).gridMaxAllocPct);
+    if (Number.isFinite(next) && next > config.gridMaxAllocPct) return false;
+  }
+
+  return true;
+};
 
 const positionVenue = (pos: Position | null | undefined): 'spot' | 'futures' => (pos?.venue ?? 'spot');
 
@@ -269,10 +312,14 @@ const persistOrderFillsSqliteBestEffort = (params: {
 
     const fills = extractOrderFills(params.order);
     if (fills.length) {
-      const totalNotional = fills.reduce((sum, f) => sum + f.qty * f.price, 0);
+      let totalFeesHome = 0;
+      let totalNotional = 0;
+      let fillCount = 0;
+
       for (const f of fills) {
         const notional = f.qty * f.price;
         if (!Number.isFinite(notional) || notional <= 0) continue;
+
         let feesHome: number | null = null;
         if (f.commission !== null && f.commissionAsset && homeAsset && f.commissionAsset === homeAsset) {
           feesHome = f.commission;
@@ -281,6 +328,10 @@ const persistOrderFillsSqliteBestEffort = (params: {
         } else if (feeRate !== null && quoteToHome !== null) {
           feesHome = notional * feeRate * quoteToHome;
         }
+
+        totalNotional += notional;
+        totalFeesHome += feesHome ?? 0;
+        fillCount += 1;
 
         persistTradeFillSqlite({
           at: params.at,
@@ -299,6 +350,15 @@ const persistOrderFillsSqliteBestEffort = (params: {
           tradeId: f.tradeId ?? undefined,
         });
       }
+
+      // Risk Governor fee burn telemetry (best-effort; do not depend on DB).
+      recordFeeTelemetryBestEffort({
+        at: params.at,
+        feesHome: Number.isFinite(totalFeesHome) ? totalFeesHome : null,
+        notionalHome: Number.isFinite(totalNotional) ? totalNotional : null,
+        fills: fillCount,
+      });
+
       return;
     }
 
@@ -324,6 +384,8 @@ const persistOrderFillsSqliteBestEffort = (params: {
       homeAsset,
       orderId: orderId ?? undefined,
     });
+
+    recordFeeTelemetryBestEffort({ at: params.at, feesHome: feesHome ?? null, notionalHome: notional, fills: 1 });
   } catch {
     // ignore
   }
@@ -1996,8 +2058,16 @@ export const autoTradeTick = async (symbol?: string) => {
     return;
   }
 
+  const governor = getRiskGovernorDecision();
+  const entriesAllowedByGovernor = !(governor?.entriesPaused ?? false);
+
   if (config.aiPolicyMode === 'advisory') {
-    const aiDecision = await runAiPolicy(symbol);
+    const aiDecisionRaw = await runAiPolicy(symbol);
+    const aiDecision =
+      aiDecisionRaw && !entriesAllowedByGovernor && aiDecisionRaw.action === 'OPEN'
+        ? { ...aiDecisionRaw, action: 'HOLD' as const, reason: `Governor ${governor?.state ?? 'UNKNOWN'}: entries paused` }
+        : aiDecisionRaw;
+
     recordDecision({
       at: aiDecision?.at ?? Date.now(),
       symbol: aiDecision?.symbol ?? symbol ?? 'UNKNOWN',
@@ -2045,7 +2115,12 @@ export const autoTradeTick = async (symbol?: string) => {
 
   try {
     if (config.aiPolicyMode === 'gated-live' && aiDecision) {
-      if (config.aiPolicyTuningAutoApply && aiDecision.tune && Object.keys(aiDecision.tune).length > 0) {
+      if (
+        config.aiPolicyTuningAutoApply &&
+        aiDecision.tune &&
+        Object.keys(aiDecision.tune).length > 0 &&
+        isRiskTighteningTune(aiDecision.tune as unknown as Record<string, unknown>)
+      ) {
         const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
         if (alreadyAppliedAt < aiDecision.at) {
           const res = applyAiTuning({ tune: { ...aiDecision.tune }, source: 'ai', reason: `ai-policy:${aiDecision.action}` });
@@ -2124,6 +2199,17 @@ export const autoTradeTick = async (symbol?: string) => {
       }
 
       if (aiDecision.action === 'OPEN' && aiDecision.symbol && aiDecision.horizon) {
+        if (!entriesAllowedByGovernor) {
+          recordDecision({
+            at: aiDecision.at,
+            symbol: aiDecision.symbol,
+            horizon: aiDecision.horizon,
+            action: 'skipped',
+            reason: `Governor ${governor?.state ?? 'UNKNOWN'}: entries paused`,
+          });
+          await updateEquityTelemetry();
+          return;
+        }
         if (config.gridEnabled) {
           await startOrSyncGrids();
         }
@@ -2172,6 +2258,18 @@ export const autoTradeTick = async (symbol?: string) => {
       await updateEquityTelemetry();
       return;
     }
+
+    if (!entriesAllowedByGovernor) {
+      // Governor may pause entries while still allowing exit management.
+      if (config.portfolioEnabled) {
+        await portfolioTick(symbol, { entriesAllowed: false });
+      } else {
+        await singleSymbolTick(symbol, { entriesAllowed: false });
+      }
+      await updateEquityTelemetry();
+      return;
+    }
+
     if (config.portfolioEnabled) {
       await portfolioTick(symbol);
     } else {

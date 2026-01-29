@@ -6,6 +6,35 @@ export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
 export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
 
+export type RiskGovernorState = 'NORMAL' | 'CAUTION' | 'HALT';
+
+export type RiskGovernorReasonCode =
+  | 'drawdown_daily'
+  | 'drawdown_rolling'
+  | 'trend'
+  | 'fee_burn'
+  | 'vol_spike'
+  | 'manual';
+
+export interface RiskGovernorDecision {
+  state: RiskGovernorState;
+  since: number;
+  reasons: Array<{ code: RiskGovernorReasonCode; detail: string }>;
+  entriesPaused: boolean;
+  gridBuyPausedGlobal: boolean;
+}
+
+export interface RiskGovernorSnapshot {
+  decision: RiskGovernorDecision | null;
+  dailyBaseline: { dayKey: string; equityHome: number; homeAsset: string; at: number } | null;
+  rollingEquity: Array<{ at: number; equityHome: number }>;
+  rollingFees: Array<{ at: number; feesHome: number; notionalHome: number; fills: number }>;
+  lastEquityHome: number;
+  homeAsset: string;
+  missingAssets?: string[];
+  updatedAt: number;
+}
+
 export interface AiPolicyTuning {
   minQuoteVolume?: number;
   maxVolatilityPercent?: number;
@@ -187,6 +216,7 @@ export interface StrategyResponsePayload {
   positions?: PersistedPayload['positions'];
   grids?: PersistedPayload['grids'];
   gridEnabled?: boolean;
+  riskGovernor?: RiskGovernorDecision | null;
   gridMaxAllocPct?: number;
   gridMaxActiveGrids?: number;
   gridLevels?: number;
@@ -280,5 +310,6 @@ export interface PersistedPayload {
       gridMaxAllocIncreasePct: number;
       lastAt?: number;
     };
+    riskGovernor?: RiskGovernorSnapshot;
   };
 }

@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { errorToLogObject } from '../utils/errors.js';
 import { autoTradeTick } from './autoTrader.js';
+import { riskGovernorTick } from './riskGovernor.js';
 import { refreshBestSymbol, refreshStrategies } from './strategyService.js';
 
 let timer: NodeJS.Timeout | null = null;
@@ -16,6 +17,8 @@ const runOnce = async () => {
       await refreshStrategies(config.defaultSymbol);
       symbolToTrade = config.defaultSymbol;
     }
+    // Risk Governor runs on live equity + indicators (no DB dependency). Best-effort: failures must not stop trading loop.
+    await riskGovernorTick(symbolToTrade);
     await autoTradeTick(symbolToTrade);
   } catch (error) {
     logger.warn({ err: errorToLogObject(error) }, 'Scheduled refresh failed');
