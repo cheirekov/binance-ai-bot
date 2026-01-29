@@ -8,8 +8,10 @@ import { backtestRoutes } from './routes/backtest.js';
 import { controlRoutes } from './routes/control.js';
 import { healthRoutes } from './routes/health.js';
 import { ordersRoutes } from './routes/orders.js';
+import { statsRoutes } from './routes/stats.js';
 import { strategyRoutes } from './routes/strategy.js';
 import { startScheduler } from './services/scheduler.js';
+import { initSqliteBestEffort } from './services/sqlite.js';
 
 const fastify = Fastify({
   // Casting keeps custom pino instance while satisfying Fastify types
@@ -22,8 +24,15 @@ const bootstrap = async () => {
   });
 
   await fastify.register(rateLimit, {
-    max: 30,
-    timeWindow: '10 seconds',
+    max: config.apiRateLimitMax,
+    timeWindow: `${config.apiRateLimitWindowSeconds} seconds`,
+    keyGenerator: (request) => {
+      const apiKey = request.headers['x-api-key'];
+      if (typeof apiKey === 'string' && apiKey.trim() !== '') return apiKey;
+      if (Array.isArray(apiKey) && apiKey.length && apiKey[0]) return apiKey[0];
+      return request.socket.remoteAddress ?? request.ip ?? 'unknown';
+    },
+    allowList: (request) => request.url === '/health' || request.url.startsWith('/health?'),
   });
 
   fastify.addHook('preHandler', async (request, reply) => {
@@ -40,7 +49,9 @@ const bootstrap = async () => {
   await fastify.register(controlRoutes);
   await fastify.register(strategyRoutes);
   await fastify.register(ordersRoutes);
+  await fastify.register(statsRoutes);
 
+  initSqliteBestEffort();
   startScheduler();
 
   try {

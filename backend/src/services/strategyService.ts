@@ -1,4 +1,4 @@
-import { get24hStats, getBalances } from '../binance/client.js';
+import { get24hStats, getBalances, getLatestPrice } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
@@ -205,6 +205,14 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
   try {
     const news = await getNewsSentiment();
     const market = await get24hStats(symbol);
+    // Use the latest ticker price for strategy entry/exit calculations; keep 24h high/low/volume from the snapshot.
+    try {
+      const latest = await getLatestPrice(symbol);
+      market.price = latest;
+      market.updatedAt = Date.now();
+    } catch {
+      // keep cached 24h price if live ticker is temporarily unavailable
+    }
     market.quoteAsset = deriveQuoteAsset(symbol);
     state.market = market;
 
@@ -227,7 +235,33 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
 
     state.tradeHalted = state.riskFlags.length > 0;
 
-    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment, quoteToHome ?? 1, options);
+    let symbolRules:
+      | {
+          tickSize?: number;
+          stepSize?: number;
+          minQty?: number;
+          minNotional?: number;
+        }
+      | undefined;
+    try {
+      const symbols = await fetchTradableSymbols();
+      const info = symbols.find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
+      if (info) {
+        symbolRules = {
+          tickSize: info.tickSize,
+          stepSize: info.stepSize,
+          minQty: info.minQty,
+          minNotional: info.minNotional,
+        };
+      }
+    } catch {
+      // ignore (best-effort; execution layer still enforces exchange rules)
+    }
+
+    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment, quoteToHome ?? 1, {
+      ...(options ?? {}),
+      symbolRules,
+    });
     state.lastUpdated = Date.now();
     state.status = 'ready';
     const snapshot = getStrategyResponse(symbol);
@@ -266,12 +300,33 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
       : lastCandidates.length > 0
         ? lastCandidates.map((c) => c.symbol)
         : Object.keys(stateBySymbol);
-  const availableSymbols = universeSymbols.filter((s) => !blocked.has(s.toUpperCase()));
   const rankedCandidates = lastCandidates.filter((c) => !blocked.has(c.symbol.toUpperCase()));
   const rankedGridCandidates = (persisted.meta?.rankedGridCandidates ?? []).filter((c) => !blocked.has(c.symbol.toUpperCase()));
   const positionsForVenue = Object.fromEntries(
     Object.entries(persisted.positions).filter(([, p]) => (p?.venue ?? 'spot') === config.tradeVenue),
   );
+  const runningGridSymbols = Object.keys(persisted.grids ?? {});
+  const positionSymbols = Object.values(positionsForVenue)
+    .map((p) => p?.symbol)
+    .filter(Boolean) as string[];
+
+  const symbolSet = new Set<string>();
+  const addSymbol = (s?: string | null) => {
+    const upper = (s ?? '').toUpperCase();
+    if (!upper) return;
+    symbolSet.add(upper);
+  };
+
+  addSymbol(activeSymbol);
+  addSymbol(symbol);
+  for (const s of universeSymbols) addSymbol(s);
+  for (const s of runningGridSymbols) addSymbol(s);
+  for (const s of positionSymbols) addSymbol(s);
+
+  const availableSymbols = Array.from(symbolSet)
+    .filter((s) => !blocked.has(s.toUpperCase()))
+    .sort((a, b) => a.localeCompare(b));
+
   return {
     status: state.status,
     symbol,

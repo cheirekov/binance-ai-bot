@@ -211,6 +211,8 @@ export interface PersistedPayload {
       horizon: Horizon;
       side: Side;
       entryPrice: number;
+      plannedEntryPrice?: number;
+      executedAvgPrice?: number;
       size: number;
       stopLoss?: number;
       takeProfit?: number[];

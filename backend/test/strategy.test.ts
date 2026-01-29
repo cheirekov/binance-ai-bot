@@ -8,7 +8,12 @@ vi.mock('../src/openai/strategist.js', () => ({
   }),
 }));
 
+vi.mock('../src/strategy/indicators.js', () => ({
+  fetchIndicatorSnapshot: vi.fn(),
+}));
+
 import { buildStrategyBundle } from '../src/strategy/engine.js';
+import { fetchIndicatorSnapshot } from '../src/strategy/indicators.js';
 import { RiskSettings } from '../src/types.js';
 
 const mockMarket = {
@@ -29,14 +34,32 @@ const risk: RiskSettings = {
 
 describe('buildStrategyBundle', () => {
   it('creates strategies for all horizons with AI notes', async () => {
-    const bundle = await buildStrategyBundle(mockMarket, risk, 0.5, 1);
+    const mocked = vi.mocked(fetchIndicatorSnapshot);
+    mocked.mockImplementation(async (symbol: string, interval: string) => ({
+      symbol,
+      interval,
+      asOf: Date.now(),
+      close: mockMarket.price,
+      volume: 100,
+      avgVolume20: 100,
+      ema20: mockMarket.price,
+      ema50: mockMarket.price - 50,
+      rsi14: 55,
+      atr14: 100,
+      adx14: 30,
+      bb20: { middle: mockMarket.price, upper: mockMarket.price + 200, lower: mockMarket.price - 200, stdDev: 100 },
+    }));
+
+    const bundle = await buildStrategyBundle(mockMarket, risk, 0.5, 1, {
+      symbolRules: { tickSize: 0.01, stepSize: 0.001, minNotional: 10, minQty: 0.001 },
+    });
 
     expect(bundle.short.horizon).toBe('short');
     expect(bundle.medium.horizon).toBe('medium');
     expect(bundle.long.horizon).toBe('long');
 
     expect(bundle.short.aiNotes).toContain('Mock AI rationale');
-    expect(bundle.medium.exitPlan.takeProfit[0]).toBeGreaterThan(mockMarket.price);
+    expect(bundle.medium.exitPlan.takeProfit[0]).toBeGreaterThan(bundle.medium.entries[0].priceTarget);
     expect(bundle.long.entries[0].size).toBeGreaterThan(0);
   });
 });

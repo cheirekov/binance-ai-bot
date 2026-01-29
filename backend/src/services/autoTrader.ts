@@ -4,13 +4,14 @@ import {
   getBalances,
   getFuturesEquity,
   getFuturesPositions,
+  getLatestPrice,
   getOcoOrder,
   getOpenOcoOrders,
   placeOcoOrder,
   placeOrder,
 } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
-import { config } from '../config.js';
+import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
 import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
@@ -19,6 +20,7 @@ import { applyAiTuning } from './aiTuning.js';
 import { startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
+import { persistDecision as persistDecisionSqlite, persistTrade as persistTradeSqlite } from './sqlite.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 import { sweepUnusedToHome } from './sweepUnused.js';
 
@@ -63,11 +65,27 @@ const floorToStep = (value: number, step?: number) => {
   return Number(floored.toFixed(decimals));
 };
 
-const recordDecision = (decision: NonNullable<PersistedPayload['meta']>['lastAutoTrade']) => {
-  persistMeta(persisted, { lastAutoTrade: decision });
+const ceilToStep = (value: number, step?: number) => {
+  if (!step) return value;
+  const decimals = decimalsForStep(step);
+  const ceiled = Math.ceil(value / step) * step;
+  return Number(ceiled.toFixed(decimals));
 };
 
 type AutoTradeDecision = NonNullable<NonNullable<PersistedPayload['meta']>['lastAutoTrade']>;
+
+const recordDecision = (decision: AutoTradeDecision) => {
+  persistMeta(persisted, { lastAutoTrade: decision });
+  persistDecisionSqlite({
+    at: decision.at,
+    symbol: decision.symbol,
+    horizon: decision.horizon,
+    action: decision.action,
+    reason: decision.reason,
+    mode: config.aiPolicyMode,
+    orderId: decision.orderId,
+  });
+};
 
 const actionFromCloseNote = (note?: string): AutoTradeDecision['action'] => {
   if (!note) return 'placed';
@@ -135,8 +153,62 @@ const extractExecutedQty = (order: unknown): number | null => {
   );
 };
 
+const extractCumulativeQuoteQty = (order: unknown): number | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  return (
+    numberFromUnknown(rec.cummulativeQuoteQty) ??
+    numberFromUnknown(rec.cumulativeQuoteQty) ??
+    numberFromUnknown(rec.cumQuote) ??
+    numberFromUnknown(rec.executedQuoteQty) ??
+    null
+  );
+};
+
+const extractExecutedAvgPrice = (order: unknown): number | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  const avgPrice = numberFromUnknown(rec.avgPrice);
+  if (avgPrice && avgPrice > 0) return avgPrice;
+
+  const fillsRaw = rec.fills;
+  if (Array.isArray(fillsRaw) && fillsRaw.length) {
+    let qtySum = 0;
+    let notionalSum = 0;
+    for (const fill of fillsRaw) {
+      if (!fill || typeof fill !== 'object') continue;
+      const f = fill as Record<string, unknown>;
+      const qty = numberFromUnknown(f.qty) ?? numberFromUnknown(f.quantity) ?? 0;
+      const price = numberFromUnknown(f.price) ?? 0;
+      if (qty > 0 && price > 0) {
+        qtySum += qty;
+        notionalSum += qty * price;
+      }
+    }
+    if (qtySum > 0 && notionalSum > 0) return notionalSum / qtySum;
+  }
+
+  const execQty = extractExecutedQty(order) ?? 0;
+  const quoteQty = extractCumulativeQuoteQty(order) ?? 0;
+  if (execQty > 0 && quoteQty > 0) return quoteQty / execQty;
+
+  return null;
+};
+
 const findSymbolInfo = (symbols: SymbolInfo[], symbol: string) =>
   symbols.find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
+
+const getCurrentPrice = async (symbol: string): Promise<number> => {
+  try {
+    return await getLatestPrice(symbol);
+  } catch {
+    try {
+      return (await get24hStats(symbol)).price;
+    } catch {
+      return Number.NaN;
+    }
+  }
+};
 
 const findConversion = (symbols: SymbolInfo[], fromAsset: string, toAsset: string) => {
   const from = fromAsset.toUpperCase();
@@ -621,7 +693,9 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
   const quoteAsset = (position.quoteAsset ?? info?.quoteAsset ?? '').toUpperCase();
   const home = config.homeAsset.toUpperCase();
 
-  const snap = await get24hStats(symbol);
+  const currentPrice = await getCurrentPrice(symbol);
+  const priceForChecks = Number.isFinite(currentPrice) && currentPrice > 0 ? currentPrice : (await get24hStats(symbol)).price;
+  const closedAt = Date.now();
 
   if (positionVenue(position) === 'futures') {
     // Futures close: reduce-only market in the opposite direction.
@@ -634,12 +708,35 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
       return { balances, note: 'Position cleared (no futures size)' };
     }
     try {
-      await placeOrder({
+      const order = await placeOrder({
         symbol,
         side: position.side === 'BUY' ? 'SELL' : 'BUY',
         quantity: adjustedQty,
         type: 'MARKET',
         reduceOnly: true,
+      });
+      const exitAvg = extractExecutedAvgPrice(order) ?? priceForChecks;
+      const entryAvg = position.executedAvgPrice ?? position.entryPrice;
+      const quoteToHome = quoteAsset ? (await getAssetToHomeRate(symbols, quoteAsset, home)) ?? 1 : 1;
+      const pnlQuote =
+        position.side === 'BUY' ? (exitAvg - entryAvg) * adjustedQty : (entryAvg - exitAvg) * adjustedQty;
+      const pnlHome = pnlQuote * quoteToHome;
+      const entryFeeHome = adjustedQty * entryAvg * feeRate.taker * quoteToHome;
+      const exitFeeHome = adjustedQty * exitAvg * feeRate.taker * quoteToHome;
+      persistTradeSqlite({
+        at: closedAt,
+        symbol,
+        positionKey,
+        event: 'CLOSE',
+        side: position.side === 'BUY' ? 'SELL' : 'BUY',
+        qty: adjustedQty,
+        avgPrice: exitAvg,
+        quoteAsset,
+        homeAsset: home,
+        feesHome: exitFeeHome,
+        pnlHome,
+        netPnlHome: pnlHome - entryFeeHome - exitFeeHome,
+        orderId: (order as { orderId?: string | number } | undefined)?.orderId,
       });
       persistPosition(persisted, positionKey, null);
       const refreshed = await getBalances();
@@ -680,16 +777,38 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
   }
 
   const minNotional = info?.minNotional ?? 0;
-  if (minNotional > 0 && adjustedQty * snap.price < minNotional) {
+  if (minNotional > 0 && adjustedQty * priceForChecks < minNotional) {
     persistPosition(persisted, positionKey, null);
-    return { balances, note: `Position cleared as dust (notional ${(adjustedQty * snap.price).toFixed(8)} < minNotional ${minNotional})` };
+    return { balances, note: `Position cleared as dust (notional ${(adjustedQty * priceForChecks).toFixed(8)} < minNotional ${minNotional})` };
   }
   try {
-    await placeOrder({ symbol, side: 'SELL', quantity: adjustedQty, type: 'MARKET' });
+    const order = await placeOrder({ symbol, side: 'SELL', quantity: adjustedQty, type: 'MARKET', price: priceForChecks });
+    const exitAvg = extractExecutedAvgPrice(order) ?? priceForChecks;
+    const entryAvg = position.executedAvgPrice ?? position.entryPrice;
+    const quoteToHome = quoteAsset ? (await getAssetToHomeRate(symbols, quoteAsset, home)) ?? 1 : 1;
+    const pnlQuote = position.side === 'BUY' ? (exitAvg - entryAvg) * adjustedQty : (entryAvg - exitAvg) * adjustedQty;
+    const pnlHome = pnlQuote * quoteToHome;
+    const entryFeeHome = adjustedQty * entryAvg * feeRate.taker * quoteToHome;
+    const exitFeeHome = adjustedQty * exitAvg * feeRate.taker * quoteToHome;
+    persistTradeSqlite({
+      at: closedAt,
+      symbol,
+      positionKey,
+      event: 'CLOSE',
+      side: 'SELL',
+      qty: adjustedQty,
+      avgPrice: exitAvg,
+      quoteAsset,
+      homeAsset: home,
+      feesHome: exitFeeHome,
+      pnlHome,
+      netPnlHome: pnlHome - entryFeeHome - exitFeeHome,
+      orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+    });
     persistPosition(persisted, positionKey, null);
     const refreshed = await refreshBalancesFromState();
     if (quoteAsset && quoteAsset !== home) {
-      const expectedQuote = adjustedQty * snap.price;
+      const expectedQuote = adjustedQty * priceForChecks;
       const converted = await convertToHome(symbols, refreshed, quoteAsset, home, expectedQuote);
       return { balances: converted.balances, note: converted.note ?? 'Closed position' };
     }
@@ -829,12 +948,13 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
     const size = floorToStep(Math.min(qtySource, totalBase > 0 ? totalBase : qtySource), info?.stepSize);
     if (!Number.isFinite(size) || size <= 0) continue;
 
-    let entryPrice = 0;
-    try {
-      entryPrice = (await get24hStats(symbol)).price;
-    } catch {
-      // Keep entry price as 0 if pricing is temporarily unavailable.
-    }
+	    let entryPrice = 0;
+	    try {
+	      const live = await getCurrentPrice(symbol);
+	      entryPrice = Number.isFinite(live) && live > 0 ? live : 0;
+	    } catch {
+	      // Keep entry price as 0 if pricing is temporarily unavailable.
+	    }
 
     let notionalHome: number | undefined;
     try {
@@ -846,16 +966,17 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
       // ignore
     }
 
-    const positionKey = getPositionKey(symbol, horizon);
-    persistPosition(persisted, positionKey, {
-      symbol,
-      horizon,
-      side: 'BUY',
-      entryPrice: entryPrice > 0 ? entryPrice : 0,
-      size,
-      stopLoss,
-      takeProfit,
-      baseAsset,
+	    const positionKey = getPositionKey(symbol, horizon);
+	    persistPosition(persisted, positionKey, {
+	      symbol,
+	      horizon,
+	      side: 'BUY',
+	      entryPrice: entryPrice > 0 ? entryPrice : 0,
+	      executedAvgPrice: entryPrice > 0 ? entryPrice : undefined,
+	      size,
+	      stopLoss,
+	      takeProfit,
+	      baseAsset,
       quoteAsset,
       homeAsset: config.homeAsset.toUpperCase(),
       notionalHome,
@@ -1003,66 +1124,68 @@ const portfolioTick = async (
     if (!pos) continue;
     if (positionVenue(pos) !== config.tradeVenue) continue;
     if (!pos.stopLoss && (!pos.takeProfit || pos.takeProfit.length === 0)) continue;
-    const snap = await get24hStats(pos.symbol);
-      const isLong = pos.side === 'BUY';
-	    if (pos.stopLoss !== undefined && (isLong ? snap.price <= pos.stopLoss : snap.price >= pos.stopLoss)) {
-	      const closed = await closePosition(symbols, key, pos, balances);
-	      balances = closed.balances;
-	      recordDecision({
-	        at: now,
-	        symbol: pos.symbol,
-	        horizon: pos.horizon,
-	        action: actionFromCloseNote(closed.note),
-	        reason: closed.note ?? 'Stop triggered',
-	      });
-	      return;
-	    }
-	    if (pos.takeProfit?.length && (isLong ? snap.price >= pos.takeProfit[0] : snap.price <= pos.takeProfit[0])) {
-	      const closed = await closePosition(symbols, key, pos, balances);
-	      balances = closed.balances;
-	      recordDecision({
-	        at: now,
-	        symbol: pos.symbol,
-	        horizon: pos.horizon,
-	        action: actionFromCloseNote(closed.note),
-	        reason: closed.note ?? 'Take-profit triggered',
-	      });
-	      return;
-	    }
+    const currentPrice = await getCurrentPrice(pos.symbol);
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) continue;
+
+    const isLong = pos.side === 'BUY';
+    if (pos.stopLoss !== undefined && (isLong ? currentPrice <= pos.stopLoss : currentPrice >= pos.stopLoss)) {
+      const closed = await closePosition(symbols, key, pos, balances);
+      balances = closed.balances;
+      recordDecision({
+        at: now,
+        symbol: pos.symbol,
+        horizon: pos.horizon,
+        action: actionFromCloseNote(closed.note),
+        reason: closed.note ?? 'Stop triggered',
+      });
+      return;
+    }
+    if (pos.takeProfit?.length && (isLong ? currentPrice >= pos.takeProfit[0] : currentPrice <= pos.takeProfit[0])) {
+      const closed = await closePosition(symbols, key, pos, balances);
+      balances = closed.balances;
+      recordDecision({
+        at: now,
+        symbol: pos.symbol,
+        horizon: pos.horizon,
+        action: actionFromCloseNote(closed.note),
+        reason: closed.note ?? 'Take-profit triggered',
+      });
+      return;
+    }
 
     // Exit if current strategy flips to SELL or trading is halted for the symbol.
     try {
       await refreshStrategies(pos.symbol, { useAi: false });
       const latest = getStrategyResponse(pos.symbol);
       const latestPlan = latest.strategies?.[pos.horizon];
-	      if (latest.tradeHalted) {
-	        const closed = await closePosition(symbols, key, pos, balances);
-	        balances = closed.balances;
-	        recordDecision({
-	          at: now,
-	          symbol: pos.symbol,
-	          horizon: pos.horizon,
-	          action: actionFromCloseNote(closed.note),
-	          reason: closed.note ?? 'Exit: risk flags',
-	        });
-	        return;
-	      }
-	      if (latestPlan && latestPlan.entries[0].side !== pos.side) {
-	        const closed = await closePosition(symbols, key, pos, balances);
-	        balances = closed.balances;
-	        recordDecision({
-	          at: now,
-	          symbol: pos.symbol,
-	          horizon: pos.horizon,
-	          action: actionFromCloseNote(closed.note),
-	          reason: closed.note ?? 'Exit: strategy flipped',
-	        });
-	        return;
-	      }
+      if (latest.tradeHalted) {
+        const closed = await closePosition(symbols, key, pos, balances);
+        balances = closed.balances;
+        recordDecision({
+          at: now,
+          symbol: pos.symbol,
+          horizon: pos.horizon,
+          action: actionFromCloseNote(closed.note),
+          reason: closed.note ?? 'Exit: risk flags',
+        });
+        return;
+      }
+      if (latestPlan && latestPlan.entries[0].side !== pos.side) {
+        const closed = await closePosition(symbols, key, pos, balances);
+        balances = closed.balances;
+        recordDecision({
+          at: now,
+          symbol: pos.symbol,
+          horizon: pos.horizon,
+          action: actionFromCloseNote(closed.note),
+          reason: closed.note ?? 'Exit: strategy flipped',
+        });
+        return;
+      }
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), symbol: pos.symbol }, 'Exit check refresh failed');
     }
-	  }
+  }
 
   const forceEntry = options?.forceEntry;
   const entriesAllowed = forceEntry ? true : (options?.entriesAllowed ?? true);
@@ -1132,7 +1255,8 @@ const portfolioTick = async (
     if (!quoteToHome) continue;
 
     const buffer = 1 + 0.002 + config.slippageBps / 10000;
-    const price = candidateState.market.price;
+    const price = await getCurrentPrice(candidate);
+    if (!Number.isFinite(price) || price <= 0) continue;
 
     let quantity = entry.size;
     if (!Number.isFinite(quantity) || quantity <= 0) continue;
@@ -1185,6 +1309,7 @@ const portfolioTick = async (
       persistLastTrade(persisted, key, now);
 
       const executedQty = extractExecutedQty(order) ?? roundedQty;
+      const executedAvgPrice = extractExecutedAvgPrice(order) ?? price;
       let ocoQty = executedQty;
 
       if (config.ocoEnabled) {
@@ -1204,15 +1329,32 @@ const portfolioTick = async (
         }
       }
 
-      const notionalHome = ocoQty * price * quoteToHome;
+      const shift = executedAvgPrice - entry.priceTarget;
+      const rawStop = plan.exitPlan.stopLoss + shift;
+      const rawTps = plan.exitPlan.takeProfit.map((tp) => tp + shift);
+
+      const tickSize = info?.tickSize;
+      const isLong = entry.side === 'BUY';
+      const stopLoss = tickSize
+        ? isLong
+          ? ceilToStep(rawStop, tickSize) // round towards entry to avoid increasing risk
+          : floorToStep(rawStop, tickSize)
+        : rawStop;
+      const takeProfit = tickSize
+        ? rawTps.map((tp) => (isLong ? floorToStep(tp, tickSize) : ceilToStep(tp, tickSize)))
+        : rawTps;
+
+      const notionalHome = ocoQty * executedAvgPrice * quoteToHome;
       let position: Position = {
         symbol: candidate,
         horizon,
         side: entry.side,
-        entryPrice: entry.priceTarget,
+        entryPrice: executedAvgPrice,
+        plannedEntryPrice: entry.priceTarget,
+        executedAvgPrice,
         size: ocoQty,
-        stopLoss: plan.exitPlan.stopLoss,
-        takeProfit: plan.exitPlan.takeProfit,
+        stopLoss,
+        takeProfit,
         baseAsset,
         quoteAsset,
         homeAsset: home,
@@ -1224,6 +1366,19 @@ const portfolioTick = async (
 
       // Persist immediately so we don't lose track of a successful entry even if OCO placement fails.
       persistPosition(persisted, key, position);
+      persistTradeSqlite({
+        at: now,
+        symbol: candidate,
+        positionKey: key,
+        event: 'OPEN',
+        side: entry.side,
+        qty: position.size,
+        avgPrice: executedAvgPrice,
+        quoteAsset,
+        homeAsset: home,
+        feesHome: position.size * executedAvgPrice * feeRate.taker * quoteToHome,
+        orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+      });
 
       if (config.ocoEnabled) {
         try {
@@ -1231,8 +1386,8 @@ const portfolioTick = async (
             symbol: candidate,
             side: 'SELL',
             quantity: ocoQty,
-            takeProfit: plan.exitPlan.takeProfit[0],
-            stopLoss: plan.exitPlan.stopLoss,
+            takeProfit: takeProfit[0],
+            stopLoss,
           });
           if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
             const orderListId = (oco as { orderListId: number }).orderListId;
@@ -1311,58 +1466,60 @@ const singleSymbolTick = async (
   const openPosition = persisted.positions[positionKey];
   if (openPosition && positionVenue(openPosition) === config.tradeVenue) {
     // Risk-off / exit checks for open position.
-    const snap = await get24hStats(state.symbol);
+    const currentPrice = await getCurrentPrice(state.symbol);
+    const priceForChecks =
+      Number.isFinite(currentPrice) && currentPrice > 0 ? currentPrice : (await get24hStats(state.symbol)).price;
     const stopLoss = openPosition.stopLoss ?? plan.exitPlan.stopLoss;
     const takeProfit = openPosition.takeProfit ?? plan.exitPlan.takeProfit;
     const isLong = openPosition.side === 'BUY';
 
-	    const news = await getNewsSentiment();
-	    if (news.sentiment <= config.riskOffSentiment) {
-	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-	      recordDecision({
-	        at: now,
-	        symbol: state.symbol,
-	        horizon,
-	        action: actionFromCloseNote(closed.note),
-	        reason: closed.note ?? `Risk-off: sentiment ${news.sentiment.toFixed(2)}`,
-	      });
-	      return;
-	    }
+    const news = await getNewsSentiment();
+    if (news.sentiment <= config.riskOffSentiment) {
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({
+        at: now,
+        symbol: state.symbol,
+        horizon,
+        action: actionFromCloseNote(closed.note),
+        reason: closed.note ?? `Risk-off: sentiment ${news.sentiment.toFixed(2)}`,
+      });
+      return;
+    }
 
-	    if (stopLoss !== undefined && (isLong ? snap.price <= stopLoss : snap.price >= stopLoss)) {
-	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-	      recordDecision({
-	        at: now,
-	        symbol: state.symbol,
-	        horizon,
-	        action: actionFromCloseNote(closed.note),
-	        reason: closed.note ?? 'Stop triggered',
-	      });
-	      return;
-	    }
-	    if (takeProfit?.length && (isLong ? snap.price >= takeProfit[0] : snap.price <= takeProfit[0])) {
-	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-	      recordDecision({
-	        at: now,
-	        symbol: state.symbol,
-	        horizon,
-	        action: actionFromCloseNote(closed.note),
-	        reason: closed.note ?? 'Take-profit triggered',
-	      });
-	      return;
-	    }
+    if (stopLoss !== undefined && (isLong ? priceForChecks <= stopLoss : priceForChecks >= stopLoss)) {
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({
+        at: now,
+        symbol: state.symbol,
+        horizon,
+        action: actionFromCloseNote(closed.note),
+        reason: closed.note ?? 'Stop triggered',
+      });
+      return;
+    }
+    if (takeProfit?.length && (isLong ? priceForChecks >= takeProfit[0] : priceForChecks <= takeProfit[0])) {
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({
+        at: now,
+        symbol: state.symbol,
+        horizon,
+        action: actionFromCloseNote(closed.note),
+        reason: closed.note ?? 'Take-profit triggered',
+      });
+      return;
+    }
 
-	    if (entry.side !== openPosition.side) {
-	      const closed = await closePosition(symbols, positionKey, openPosition, balances);
-	      recordDecision({
-	        at: now,
-	        symbol: state.symbol,
-	        horizon,
-	        action: actionFromCloseNote(closed.note),
-	        reason: closed.note ?? 'Exit: strategy flipped',
-	      });
-	      return;
-	    }
+    if (entry.side !== openPosition.side) {
+      const closed = await closePosition(symbols, positionKey, openPosition, balances);
+      recordDecision({
+        at: now,
+        symbol: state.symbol,
+        horizon,
+        action: actionFromCloseNote(closed.note),
+        reason: closed.note ?? 'Exit: strategy flipped',
+      });
+      return;
+    }
 
     recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'Position already open' });
     return;
@@ -1422,7 +1579,11 @@ const singleSymbolTick = async (
     return;
   }
 
-  const price = state.market.price;
+  const price = await getCurrentPrice(state.symbol);
+  if (!Number.isFinite(price) || price <= 0) {
+    recordDecision({ at: now, symbol: state.symbol, horizon, action: 'skipped', reason: 'Price unavailable' });
+    return;
+  }
   let quantity = entry.size;
   const buffer = 1 + 0.002 + config.slippageBps / 10000;
   if (config.tradeVenue !== 'futures') {
@@ -1479,6 +1640,7 @@ const singleSymbolTick = async (
     persistLastTrade(persisted, key, now);
 
     const executedQty = extractExecutedQty(order) ?? adjustedQty;
+    const executedAvgPrice = extractExecutedAvgPrice(order) ?? price;
     let ocoQty = executedQty;
     if (config.ocoEnabled) {
       try {
@@ -1497,18 +1659,34 @@ const singleSymbolTick = async (
       }
     }
 
+    const shift = executedAvgPrice - entry.priceTarget;
+    const rawStop = plan.exitPlan.stopLoss + shift;
+    const rawTps = plan.exitPlan.takeProfit.map((tp) => tp + shift);
+    const tickSize = info?.tickSize;
+    const isLong = entry.side === 'BUY';
+    const stopLoss = tickSize
+      ? isLong
+        ? ceilToStep(rawStop, tickSize)
+        : floorToStep(rawStop, tickSize)
+      : rawStop;
+    const takeProfit = tickSize
+      ? rawTps.map((tp) => (isLong ? floorToStep(tp, tickSize) : ceilToStep(tp, tickSize)))
+      : rawTps;
+
     let position: Position = {
       symbol: state.symbol,
       horizon,
       side: entry.side,
-      entryPrice: entry.priceTarget,
+      entryPrice: executedAvgPrice,
+      plannedEntryPrice: entry.priceTarget,
+      executedAvgPrice,
       size: ocoQty,
-      stopLoss: plan.exitPlan.stopLoss,
-      takeProfit: plan.exitPlan.takeProfit,
+      stopLoss,
+      takeProfit,
       baseAsset,
       quoteAsset,
       homeAsset: home,
-      notionalHome: ocoQty * price * quoteToHome,
+      notionalHome: ocoQty * executedAvgPrice * quoteToHome,
       venue: config.tradeVenue,
       leverage: config.tradeVenue === 'futures' ? config.futuresLeverage : undefined,
       openedAt: now,
@@ -1516,6 +1694,19 @@ const singleSymbolTick = async (
 
     // Persist immediately so we don't lose track of a successful entry even if OCO placement fails.
     persistPosition(persisted, key, position);
+    persistTradeSqlite({
+      at: now,
+      symbol: state.symbol,
+      positionKey: key,
+      event: 'OPEN',
+      side: entry.side,
+      qty: position.size,
+      avgPrice: executedAvgPrice,
+      quoteAsset,
+      homeAsset: home,
+      feesHome: position.size * executedAvgPrice * feeRate.taker * quoteToHome,
+      orderId: (order as { orderId?: string | number } | undefined)?.orderId,
+    });
 
     if (config.ocoEnabled) {
       try {
@@ -1523,8 +1714,8 @@ const singleSymbolTick = async (
           symbol: state.symbol,
           side: 'SELL',
           quantity: ocoQty,
-          takeProfit: plan.exitPlan.takeProfit[0],
-          stopLoss: plan.exitPlan.stopLoss,
+          takeProfit: takeProfit[0],
+          stopLoss,
         });
         if (oco && typeof (oco as { orderListId?: number }).orderListId === 'number') {
           const orderListId = (oco as { orderListId: number }).orderListId;

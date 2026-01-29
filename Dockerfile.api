@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY backend ./backend
 
+RUN apk add --no-cache --virtual .gyp python3 make g++
 RUN npm ci
 RUN npm run build --workspace backend
 
@@ -13,7 +14,9 @@ ENV NODE_ENV=production
 
 COPY package.json package-lock.json ./
 COPY backend/package.json ./backend/package.json
-RUN npm ci --omit=dev
+RUN apk add --no-cache --virtual .gyp python3 make g++ \
+  && npm ci --omit=dev \
+  && apk del .gyp
 
 COPY --from=builder /app/backend/dist ./backend/dist
 

@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-import { OpenOrdersResponse, OrderHistoryResponse, PanicLiquidateResponse, StrategyResponse, SweepUnusedResponse } from './types';
+import { DbStatsResponse, OpenOrdersResponse, OrderHistoryResponse, PanicLiquidateResponse, PerformanceStatsResponse, StrategyResponse, SweepUnusedResponse } from './types';
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://localhost:8788',
@@ -90,4 +90,34 @@ export const fetchOrderHistory = async (params: { symbol: string; limit?: number
     params: { symbol: params.symbol, limit: params.limit ?? 50 },
   });
   return data;
+};
+
+export const fetchPerformanceStatsOptional = async (): Promise<PerformanceStatsResponse | null> => {
+  try {
+    const { data } = await api.get<PerformanceStatsResponse>('/stats/performance');
+    return data;
+  } catch (err) {
+    const status =
+      typeof err === 'object' && err && 'response' in err
+        ? (err as { response?: { status?: number } }).response?.status
+        : undefined;
+    // Optional endpoint: hide silently on 404 or any error.
+    if (status === 404) return null;
+    return null;
+  }
+};
+
+export const fetchDbStatsOptional = async (): Promise<DbStatsResponse | null> => {
+  try {
+    const { data } = await api.get<DbStatsResponse>('/stats/db');
+    if (!data?.persistToSqlite) return null;
+    return data;
+  } catch (err) {
+    const status =
+      typeof err === 'object' && err && 'response' in err
+        ? (err as { response?: { status?: number } }).response?.status
+        : undefined;
+    if (status === 404) return null;
+    return null;
+  }
 };

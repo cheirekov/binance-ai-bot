@@ -139,6 +139,8 @@ export const config = {
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
   blacklistSymbols: listFromEnvUpper(process.env.BLACKLIST_SYMBOLS, []),
   persistencePath: stringFromEnv(process.env.PERSISTENCE_PATH, './data/state.json'),
+  persistToSqlite: boolFromEnv(process.env.PERSIST_TO_SQLITE, false),
+  sqlitePath: stringFromEnv(process.env.SQLITE_PATH, '/app/data/bot.sqlite'),
   autoTradeEnabled: boolFromEnv(process.env.AUTO_TRADE_ENABLED, false),
   autoTradeHorizon: (process.env.AUTO_TRADE_HORIZON ?? 'short').toLowerCase() as 'short' | 'medium' | 'long',
   autoTradeMinConfidence: numberFromEnv(process.env.AUTO_TRADE_MIN_CONFIDENCE, 55) / 100,
@@ -178,6 +180,8 @@ export const config = {
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),
   aiPolicySweepCooldownMinutes: numberFromEnv(process.env.AI_POLICY_SWEEP_COOLDOWN_MINUTES, 180),
+  apiRateLimitMax: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_MAX, 120))),
+  apiRateLimitWindowSeconds: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_WINDOW_SECONDS, 10))),
   apiKey: optionalStringFromEnv(process.env.API_KEY),
   clientKey: optionalStringFromEnv(process.env.CLIENT_KEY),
 };
