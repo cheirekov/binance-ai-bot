@@ -17,10 +17,10 @@ import { Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { runAiPolicy } from './aiPolicy.js';
 import { applyAiTuning } from './aiTuning.js';
-import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
 import { pauseGridBuys, resumeGridBuys, startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
+import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
 import {
   persistConversionEvent,
   persistDecision as persistDecisionSqlite,

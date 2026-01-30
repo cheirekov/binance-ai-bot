@@ -509,11 +509,11 @@ export const getOpenOrders = async (symbol?: string): Promise<unknown[]> => {
   return Array.isArray(data) ? (data as unknown[]) : [];
 };
 
-export const getOrder = async (symbol: string, orderId: number): Promise<unknown> => {
+export const getOrder = async (symbol: string, orderId: string | number): Promise<unknown> => {
   if (isFuturesVenue()) {
-    return signedFuturesRequest('GET', '/fapi/v1/order', { symbol: symbol.toUpperCase(), orderId });
+    return signedFuturesRequest('GET', '/fapi/v1/order', { symbol: symbol.toUpperCase(), orderId: String(orderId) });
   }
-  const { data } = await client.getOrder(symbol, { orderId });
+  const { data } = await client.getOrder(symbol, { orderId: String(orderId) });
   return data;
 };
 
@@ -525,6 +525,32 @@ export const getOrderHistory = async (symbol: string, limit = 50): Promise<unkno
     return Array.isArray(data) ? data : [];
   }
   const data = await signedSpotRequest<unknown[]>('GET', '/api/v3/allOrders', { symbol: upper, limit: capped });
+  return Array.isArray(data) ? data : [];
+};
+
+export const getMyTrades = async (
+  symbol: string,
+  params?: {
+    orderId?: string | number;
+    fromId?: string | number;
+    startTime?: number;
+    endTime?: number;
+    limit?: number;
+  },
+): Promise<unknown[]> => {
+  if (isFuturesVenue()) {
+    throw new Error('myTrades is only supported in spot mode');
+  }
+  const upper = symbol.toUpperCase();
+  const capped = params?.limit !== undefined ? Math.max(1, Math.min(1000, params.limit)) : 1000;
+  const data = await signedSpotRequest<unknown[]>('GET', '/api/v3/myTrades', {
+    symbol: upper,
+    orderId: params?.orderId !== undefined ? String(params.orderId) : undefined,
+    fromId: params?.fromId !== undefined ? String(params.fromId) : undefined,
+    startTime: params?.startTime !== undefined ? Math.floor(params.startTime) : undefined,
+    endTime: params?.endTime !== undefined ? Math.floor(params.endTime) : undefined,
+    limit: capped,
+  });
   return Array.isArray(data) ? data : [];
 };
 

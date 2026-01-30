@@ -2,14 +2,13 @@ import { getBalances, getFuturesEquity, getLatestPrice } from '../binance/client
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
+import { fetchIndicatorSnapshot } from '../strategy/indicators.js';
 import { Balance, RiskGovernorDecision, RiskGovernorSnapshot, RiskGovernorState } from '../types.js';
 import { errorToLogObject } from '../utils/errors.js';
-import { fetchIndicatorSnapshot } from '../strategy/indicators.js';
 import { getPersistedState, persistMeta } from './persistence.js';
 
 const persisted = getPersistedState();
 
-type EquityPoint = { at: number; equityHome: number };
 type FeePoint = { at: number; feesHome: number; notionalHome: number; fills: number };
 
 const pad2 = (n: number) => String(n).padStart(2, '0');

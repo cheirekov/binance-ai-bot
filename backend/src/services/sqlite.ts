@@ -13,8 +13,9 @@ import { computeFillPnlDeltasBySymbol, computeGridPnlDeltas, computePortfolioPnl
 type SqliteDb = {
   pragma: (value: string) => void;
   exec: (sql: string) => void;
+  // better-sqlite3 Statement#run returns a result object with `.changes` and `.lastInsertRowid`.
   prepare: (sql: string) => {
-    run: (params?: Record<string, unknown>) => void;
+    run: (params?: Record<string, unknown>) => { changes: number };
     get: () => Record<string, unknown> | undefined;
     all: () => Array<Record<string, unknown>>;
   };
@@ -443,7 +444,11 @@ export const persistTradeFill = (row: {
 
     db.prepare(
       `INSERT INTO trades (at, symbol, module, event, side, qty, avgPrice, price, notional, quoteAsset, homeAsset, feeAsset, feeAmount, feesHome, orderId, tradeId)
-       VALUES (@at, @symbol, @module, @event, @side, @qty, @avgPrice, @price, @notional, @quoteAsset, @homeAsset, @feeAsset, @feeAmount, @feesHome, @orderId, @tradeId)
+       SELECT @at, @symbol, @module, @event, @side, @qty, @avgPrice, @price, @notional, @quoteAsset, @homeAsset, @feeAsset, @feeAmount, @feesHome, @orderId, @tradeId
+       WHERE NOT EXISTS (
+         SELECT 1 FROM trades t
+         WHERE t.symbol=@symbol AND t.module=@module AND t.orderId=@orderId AND t.event='FILL' AND t.tradeId IS NOT NULL
+       )
        ON CONFLICT(symbol, module, side, orderId, event) WHERE tradeId IS NULL AND orderId IS NOT NULL AND event='FILL'
        DO UPDATE SET
          at=excluded.at,
@@ -455,8 +460,135 @@ export const persistTradeFill = (row: {
          homeAsset=COALESCE(excluded.homeAsset, trades.homeAsset),
          feeAsset=COALESCE(excluded.feeAsset, trades.feeAsset),
          feeAmount=COALESCE(excluded.feeAmount, trades.feeAmount),
-         feesHome=COALESCE(excluded.feesHome, trades.feesHome)`,
+         feesHome=COALESCE(excluded.feesHome, trades.feesHome)
+       WHERE NOT EXISTS (
+         SELECT 1 FROM trades t
+         WHERE t.symbol=@symbol AND t.module=@module AND t.orderId=@orderId AND t.event='FILL' AND t.tradeId IS NOT NULL
+       )`,
     ).run(params);
+  });
+};
+
+export const persistTradeFillsBatch = (params: {
+  fills: Array<{
+    at: number;
+    symbol: string;
+    module: 'grid' | 'portfolio';
+    side: 'BUY' | 'SELL';
+    qty: number;
+    price: number;
+    notional: number;
+    feeAsset?: string;
+    feeAmount?: number;
+    feesHome?: number;
+    quoteAsset?: string;
+    homeAsset?: string;
+    orderId?: string | number;
+    tradeId?: string | number;
+  }>;
+  log?: { symbol: string; orderId: string | number; module: 'grid' | 'portfolio' };
+}) => {
+  if (!params.fills.length) return;
+
+  enqueueWrite((db) => {
+    const withIdStmt = db.prepare(
+      `INSERT OR IGNORE INTO trades (at, symbol, module, event, side, qty, avgPrice, price, notional, quoteAsset, homeAsset, feeAsset, feeAmount, feesHome, orderId, tradeId)
+       VALUES (@at, @symbol, @module, @event, @side, @qty, @avgPrice, @price, @notional, @quoteAsset, @homeAsset, @feeAsset, @feeAmount, @feesHome, @orderId, @tradeId)`,
+    );
+
+    const noIdStmt = db.prepare(
+      `INSERT INTO trades (at, symbol, module, event, side, qty, avgPrice, price, notional, quoteAsset, homeAsset, feeAsset, feeAmount, feesHome, orderId, tradeId)
+       SELECT @at, @symbol, @module, @event, @side, @qty, @avgPrice, @price, @notional, @quoteAsset, @homeAsset, @feeAsset, @feeAmount, @feesHome, @orderId, @tradeId
+       WHERE NOT EXISTS (
+         SELECT 1 FROM trades t
+         WHERE t.symbol=@symbol AND t.module=@module AND t.orderId=@orderId AND t.event='FILL' AND t.tradeId IS NOT NULL
+       )
+       ON CONFLICT(symbol, module, side, orderId, event) WHERE tradeId IS NULL AND orderId IS NOT NULL AND event='FILL'
+       DO UPDATE SET
+         at=excluded.at,
+         qty=CASE WHEN excluded.qty > trades.qty THEN excluded.qty ELSE trades.qty END,
+         notional=CASE WHEN excluded.notional > trades.notional THEN excluded.notional ELSE trades.notional END,
+         avgPrice=excluded.avgPrice,
+         price=excluded.price,
+         quoteAsset=COALESCE(excluded.quoteAsset, trades.quoteAsset),
+         homeAsset=COALESCE(excluded.homeAsset, trades.homeAsset),
+         feeAsset=COALESCE(excluded.feeAsset, trades.feeAsset),
+         feeAmount=COALESCE(excluded.feeAmount, trades.feeAmount),
+         feesHome=COALESCE(excluded.feesHome, trades.feesHome)
+       WHERE NOT EXISTS (
+         SELECT 1 FROM trades t
+         WHERE t.symbol=@symbol AND t.module=@module AND t.orderId=@orderId AND t.event='FILL' AND t.tradeId IS NOT NULL
+       )`,
+    );
+
+    const deleteAggStmt = db.prepare(
+      `DELETE FROM trades
+       WHERE symbol=@symbol AND module=@module AND orderId=@orderId AND event='FILL' AND tradeId IS NULL`,
+    );
+
+    let inserted = 0;
+    let skipped = 0;
+    const deleteAggFor = new Map<string, { symbol: string; module: string; orderId: string }>();
+
+    for (const fill of params.fills) {
+      const symbol = fill.symbol.toUpperCase();
+      const module = fill.module;
+      const side = String(fill.side ?? '').toUpperCase();
+      const qty = fill.qty;
+      const price = fill.price;
+      const notional = fill.notional;
+      const orderId = fill.orderId !== undefined ? String(fill.orderId) : null;
+      const tradeId = fill.tradeId !== undefined && fill.tradeId !== null ? String(fill.tradeId) : null;
+
+      const stmtParams = {
+        at: fill.at,
+        symbol,
+        module,
+        event: 'FILL',
+        side,
+        qty,
+        avgPrice: price,
+        price,
+        notional,
+        quoteAsset: fill.quoteAsset ? fill.quoteAsset.toUpperCase() : null,
+        homeAsset: fill.homeAsset ? fill.homeAsset.toUpperCase() : null,
+        feeAsset: fill.feeAsset ? fill.feeAsset.toUpperCase() : null,
+        feeAmount: fill.feeAmount ?? null,
+        feesHome: fill.feesHome ?? null,
+        orderId,
+        tradeId,
+      } as Record<string, unknown>;
+
+      const res = tradeId ? withIdStmt.run(stmtParams) : noIdStmt.run(stmtParams);
+      if (res?.changes) {
+        inserted += Number(res.changes) || 0;
+      } else {
+        skipped += 1;
+      }
+
+      if (tradeId && orderId) {
+        deleteAggFor.set(`${symbol}:${module}:${orderId}`, { symbol, module, orderId });
+      }
+    }
+
+    for (const del of deleteAggFor.values()) {
+      deleteAggStmt.run({ symbol: del.symbol, module: del.module, orderId: del.orderId });
+    }
+
+    if (params.log) {
+      const symbol = params.log.symbol.toUpperCase();
+      const orderId = String(params.log.orderId);
+      logger.info(
+        {
+          symbol,
+          orderId,
+          module: params.log.module,
+          inserted,
+          skippedDuplicates: skipped,
+        },
+        `trade-sync: symbol=${symbol} orderId=${orderId} inserted=${inserted}`,
+      );
+    }
   });
 };
 

@@ -4,6 +4,7 @@ import { errorToLogObject } from '../utils/errors.js';
 import { autoTradeTick } from './autoTrader.js';
 import { riskGovernorTick } from './riskGovernor.js';
 import { refreshBestSymbol, refreshStrategies } from './strategyService.js';
+import { tradeSyncTick } from './tradeSync.js';
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -20,6 +21,8 @@ const runOnce = async () => {
     // Risk Governor runs on live equity + indicators (no DB dependency). Best-effort: failures must not stop trading loop.
     await riskGovernorTick(symbolToTrade);
     await autoTradeTick(symbolToTrade);
+    // Trade sync runs in the background (never blocks the trading tick).
+    void tradeSyncTick();
   } catch (error) {
     logger.warn({ err: errorToLogObject(error) }, 'Scheduled refresh failed');
   }
