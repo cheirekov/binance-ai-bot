@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-vi.mock('../src/openai/strategist.js', () => ({
+vi.mock('../src/ai/strategist.js', () => ({
   generateAiInsight: async () => ({
     rationale: 'Mock AI rationale',
     cautions: [],

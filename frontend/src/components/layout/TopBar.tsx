@@ -23,7 +23,7 @@ const autonomyHelp = (profile?: string) => {
   return 'AI autonomy profile controls what the coach can apply automatically.';
 };
 
-const aiModeHelp = (mode?: StrategyResponse['aiPolicyMode']) => {
+const aiModeHelp = (mode?: StrategyResponse['aiMode'] | StrategyResponse['aiPolicyMode']) => {
   if (mode === 'gated-live') return 'AI gated-live: AI proposes actions; engine executes only if all safety gates pass.';
   if (mode === 'advisory') return 'AI advisory: AI suggestions only; no auto execution.';
   return 'AI off: no LLM calls.';
@@ -46,7 +46,7 @@ export const TopBar = (props: {
   const tradeHalted = !!props.data?.tradeHalted;
   const venue = props.data?.tradeVenue;
   const gridEnabled = !!props.data?.gridEnabled;
-  const aiMode = props.data?.aiPolicyMode ?? 'off';
+  const aiMode = props.data?.aiMode ?? props.data?.aiPolicyMode ?? 'off';
   const autonomy = props.data?.aiAutonomy ?? null;
 
   const liveBanner = tradingEnabled ? (
@@ -113,7 +113,7 @@ export const TopBar = (props: {
               tone={aiMode === 'gated-live' ? 'good' : aiMode === 'advisory' ? 'info' : 'neutral'}
               title={aiModeHelp(aiMode)}
             >
-              AI {aiMode}
+              AI Mode {aiMode}
             </Chip>
             {autonomy ? (
               <Chip tone={autonomyTone(autonomy.profile)} title={autonomyHelp(autonomy.profile)}>

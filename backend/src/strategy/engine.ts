@@ -1,5 +1,5 @@
 import { config } from '../config.js';
-import { generateAiInsight } from '../openai/strategist.js';
+import { generateAiInsight } from '../ai/strategist.js';
 import { persistMarketFeatures } from '../services/sqlite.js';
 import { Horizon, MarketSnapshot, RiskSettings, Side, StrategyBundle, StrategyPlan } from '../types.js';
 import { fetchIndicatorSnapshot, IndicatorSnapshot } from './indicators.js';

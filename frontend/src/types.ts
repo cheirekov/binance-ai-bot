@@ -21,6 +21,9 @@ export type GridStatus = 'running' | 'stopped' | 'error';
 
 export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
+// Canonical name (AI_MODE is the env var; backend also returns aiMode).
+export type AiMode = AiPolicyMode;
+
 export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC' | 'PAUSE_GRID' | 'RESUME_GRID' | 'REDUCE_RISK';
 
 export type AiAutonomyProfile = 'safe' | 'standard' | 'pro' | 'aggressive';
@@ -224,7 +227,12 @@ export interface StrategyResponse {
     reason?: string;
     orderId?: string | number;
   };
+  // Canonical: aiMode. Keep aiPolicyMode optional for backward-compatible UI parsing.
+  aiMode?: AiMode;
   aiPolicyMode?: AiPolicyMode;
+  aiModel?: string;
+  aiPolicyModel?: string;
+  aiStrategyModel?: string;
   aiPolicy?: AiPolicyMeta;
   runtimeConfig?: {
     updatedAt: number;
@@ -232,10 +240,12 @@ export interface StrategyResponse {
     reason?: string;
     values: AiPolicyTuning;
   };
-  symbolPolicy?: {
-    whitelist: string[];
-    envBlacklist: string[];
-    accountBlacklist: Array<{ symbol: string; at: number; reason: string }>;
+  universe?: {
+    mode: 'static' | 'discovery';
+    tradeUniverse: string[];
+    quoteAssets: string[];
+    tradeDenylist: string[];
+    accountDenylist: Array<{ symbol: string; at: number; reason: string }>;
     autoBlacklist: Array<{
       symbol: string;
       at: number;

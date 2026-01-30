@@ -239,10 +239,13 @@ export interface StrategyResponsePayload {
   maxVolatilityPercent?: number;
   autoTradeHorizon?: Horizon;
   availableSymbols: string[];
-  symbolPolicy?: {
-    whitelist: string[];
-    envBlacklist: string[];
-    accountBlacklist: Array<{ symbol: string; at: number; reason: string }>;
+
+  universe?: {
+    mode: 'static' | 'discovery';
+    tradeUniverse: string[];
+    quoteAssets: string[];
+    tradeDenylist: string[];
+    accountDenylist: Array<{ symbol: string; at: number; reason: string }>;
     autoBlacklist: Array<{
       symbol: string;
       at: number;
@@ -253,6 +256,7 @@ export interface StrategyResponsePayload {
       triggers?: string[];
     }>;
   };
+
   aiAutonomy?: { profile: AiAutonomyProfile; capabilities: AiAutonomyCapabilities };
   aiCoach?: {
     enabled: boolean;
@@ -292,7 +296,14 @@ export interface StrategyResponsePayload {
   gridLevels?: number;
   gridRebalanceSeconds?: number;
   equity?: NonNullable<PersistedPayload['meta']>['equity'];
+
+  aiMode?: AiPolicyMode;
+  // Backward-compat (older UI clients)
   aiPolicyMode?: AiPolicyMode;
+
+  aiModel?: string;
+  aiPolicyModel?: string;
+  aiStrategyModel?: string;
   aiPolicy?: NonNullable<PersistedPayload['meta']>['aiPolicy'];
   runtimeConfig?: NonNullable<PersistedPayload['meta']>['runtimeConfig'];
   emergencyStop?: boolean;

@@ -101,7 +101,8 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
   const autonomy = props.data?.aiAutonomy ?? null;
   const coachLatest = props.data?.aiCoach?.latest ?? null;
   const coachEnabled = props.data?.aiCoach?.enabled ?? false;
-  const symbolPolicy = props.data?.symbolPolicy ?? null;
+  const universe = props.data?.universe ?? null;
+  const aiMode = props.data?.aiMode ?? props.data?.aiPolicyMode ?? 'off';
 
   const expectedTyped = useMemo(() => {
     if (!manualSide) return null;
@@ -222,10 +223,10 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
               Convert: {props.data?.conversionEnabled ? 'On' : 'Off'}
             </Chip>
             <Chip
-              tone={props.data?.aiPolicyMode === 'gated-live' ? 'good' : props.data?.aiPolicyMode === 'advisory' ? 'info' : 'neutral'}
-              title={props.data?.aiPolicyMode === 'gated-live' ? 'AI gated-live: AI proposes actions; engine executes only if all safety gates pass.' : props.data?.aiPolicyMode === 'advisory' ? 'AI advisory: AI suggestions only.' : 'AI off.'}
+              tone={aiMode === 'gated-live' ? 'good' : aiMode === 'advisory' ? 'info' : 'neutral'}
+              title={aiMode === 'gated-live' ? 'AI gated-live: AI proposes actions; engine executes only if all safety gates pass.' : aiMode === 'advisory' ? 'AI advisory: AI suggestions only.' : 'AI off.'}
             >
-              AI: {props.data?.aiPolicyMode ?? 'off'}
+              AI Mode: {aiMode}
             </Chip>
             {autonomy ? (
               <Chip
@@ -256,6 +257,33 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
           ) : (
             <p className="muted">No risk flags reported.</p>
           )}
+
+          <div className="divider" />
+          <div className="label">Config summary (no secrets)</div>
+          <div className="kv-grid">
+            <div className="kv">
+              <div className="label">Universe</div>
+              <div className="value">
+                {universe ? (universe.mode === 'static' ? 'static' : 'auto-discovery') : '—'}
+              </div>
+              <div className="muted">
+                {universe?.tradeUniverse?.length ? `${universe.tradeUniverse.length} symbols` : universe ? 'TRADE_UNIVERSE empty' : ''}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="label">Quote assets</div>
+              <div className="value">{universe?.quoteAssets?.length ? universe.quoteAssets.join(', ') : '—'}</div>
+            </div>
+            <div className="kv">
+              <div className="label">AI model</div>
+              <div className="value">{props.data?.aiModel ?? '—'}</div>
+              <div className="muted">
+                {props.data?.aiPolicyModel || props.data?.aiStrategyModel
+                  ? `policy ${props.data?.aiPolicyModel || 'default'} · strategy ${props.data?.aiStrategyModel || 'default'}`
+                  : ''}
+              </div>
+            </div>
+          </div>
         </Card>
       </div>
 
@@ -342,8 +370,8 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
             <Chip tone={coachLatest?.proposals?.some((p) => p.applied.applied) ? 'good' : 'neutral'}>
               Applied: {coachLatest ? coachLatest.proposals.filter((p) => p.applied.applied).length : 0}
             </Chip>
-            <Chip tone={symbolPolicy?.autoBlacklist?.length ? 'warn' : 'neutral'} title="Active auto-blacklists hide symbols from candidates/universe">
-              Auto-blacklist: {symbolPolicy?.autoBlacklist?.length ?? 0}
+            <Chip tone={universe?.autoBlacklist?.length ? 'warn' : 'neutral'} title="Active auto-blacklists hide symbols from the trade universe">
+              Auto-blacklist: {universe?.autoBlacklist?.length ?? 0}
             </Chip>
           </div>
 
@@ -434,16 +462,19 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
             ) : null}
           </details>
 
-          {symbolPolicy?.whitelist?.length ? (
-            <p className="muted">Whitelist active: {symbolPolicy.whitelist.join(', ')}</p>
-          ) : (
-            <p className="muted">Whitelist: off</p>
-          )}
-          {symbolPolicy?.autoBlacklist?.length ? (
+          {universe ? (
+            <p className="muted">
+              Universe: {universe.mode === 'static' ? 'static (TRADE_UNIVERSE)' : 'auto-discovery'}
+              {universe.tradeUniverse?.length ? ` · ${universe.tradeUniverse.length} symbols` : ''}
+              {universe.quoteAssets?.length ? ` · quotes ${universe.quoteAssets.join(', ')}` : ''}
+            </p>
+          ) : null}
+
+          {universe?.autoBlacklist?.length ? (
             <details className="details">
               <summary>Active auto-blacklists</summary>
               <ul className="bullets">
-                {symbolPolicy.autoBlacklist.slice(0, 30).map((b) => (
+                {universe.autoBlacklist.slice(0, 30).map((b) => (
                   <li key={b.symbol}>
                     <span className="mono">{b.symbol}</span>
                     {b.reason ? ` · ${b.reason}` : ''}

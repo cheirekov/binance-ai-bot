@@ -8,7 +8,7 @@ import { errorToLogObject } from '../utils/errors.js';
 import { resolveAutonomy } from './aiAutonomy.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta, persistStrategy } from './persistence.js';
-import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
+import { getSymbolBlockInfo, isSymbolViewAllowed, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const currentRiskSettings = (): RiskSettings => ({
   maxPositionSizeUsdt: config.maxPositionSizeUsdt,
@@ -21,7 +21,7 @@ const persisted = getPersistedState();
 const quoteToHomeCache: Record<string, { rate: number; fetchedAt: number }> = {};
 let cachedBalances: { fetchedAt: number; balances: Balance[] } | null = null;
 let activeSymbol =
-  (config.allowedSymbols.length > 0 ? config.defaultSymbol : persisted.meta?.activeSymbol?.toUpperCase()) ||
+  (config.tradeUniverse.length > 0 ? config.defaultSymbol : persisted.meta?.activeSymbol?.toUpperCase()) ||
   config.defaultSymbol;
 let lastCandidates: { symbol: string; score: number }[] = persisted.meta?.rankedCandidates ?? [];
 let lastAutoSelectAt: number | null = persisted.meta?.autoSelectUpdatedAt ?? null;
@@ -66,7 +66,7 @@ const ensureActiveSymbolAllowed = () => {
   if (getSymbolBlockInfo(activeUpper, now).blocked) {
     const pool = [
       config.defaultSymbol,
-      ...config.allowedSymbols,
+      ...config.tradeUniverse,
       ...(persisted.meta?.rankedCandidates?.map((c) => c.symbol) ?? []),
     ]
       .map((s) => s.toUpperCase())
@@ -94,19 +94,17 @@ export const normalizeSymbol = (symbol?: string) => {
   if (!/^[A-Z0-9]{5,15}$/.test(normalized)) {
     throw new Error('Invalid symbol format');
   }
-  // Allowed list acts as a block list only when non-empty and symbol not discovered
-  if (
-    config.allowedSymbols.length > 0 &&
-    !config.allowedSymbols.includes(normalized) &&
-    !stateBySymbol[normalized]
-  ) {
-    throw new Error(`Symbol ${normalized} not allowed. Update ALLOWED_SYMBOLS to include it.`);
+  // Universe is the trade gate; but keep UI view-compatible for persisted symbols.
+  const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  if (getSymbolBlockInfo(normalized, now).blocked && !isSymbolViewAllowed(normalized)) {
+    throw new Error(`Symbol ${normalized} not allowed by universe policy.`);
   }
   return normalized;
 };
 
 const deriveQuoteAsset = (symbol: string): string => {
-  const candidates = [...config.allowedQuoteAssets, 'BTC', 'BNB', 'ETH'];
+  const candidates = [...config.quoteAssets, 'BTC', 'BNB', 'ETH'];
   const match = candidates.find((q) => symbol.endsWith(q));
   if (match) return match;
   // fallback: last 3 characters
@@ -305,8 +303,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
   }
   const state = ensureState(symbol);
   const universeSymbols =
-    config.allowedSymbols.length > 0
-      ? config.allowedSymbols
+    config.tradeUniverse.length > 0
+      ? config.tradeUniverse
       : lastCandidates.length > 0
         ? lastCandidates.map((c) => c.symbol)
         : Object.keys(stateBySymbol);
@@ -358,10 +356,12 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     tradingEnabled: config.tradingEnabled,
     autoTradeEnabled: config.autoTradeEnabled,
     homeAsset: config.homeAsset,
-    symbolPolicy: {
-      whitelist: config.symbolWhitelist ?? [],
-      envBlacklist: config.blacklistSymbols ?? [],
-      accountBlacklist: Object.entries(persisted.meta?.accountBlacklist ?? {})
+    universe: {
+      mode: config.tradeUniverse.length > 0 ? 'static' : 'discovery',
+      tradeUniverse: config.tradeUniverse,
+      quoteAssets: config.quoteAssets,
+      tradeDenylist: config.tradeDenylist,
+      accountDenylist: Object.entries(persisted.meta?.accountBlacklist ?? {})
         .map(([symbol, row]) => ({ symbol: symbol.toUpperCase(), at: row.at ?? 0, reason: row.reason ?? 'account_blacklist' }))
         .filter((r) => r.symbol)
         .sort((a, b) => a.symbol.localeCompare(b.symbol)),
@@ -405,7 +405,10 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     gridMaxActiveGrids: config.gridMaxActiveGrids,
     gridLevels: config.gridLevels,
     gridRebalanceSeconds: config.gridRebalanceSeconds,
-    aiPolicyMode: config.aiPolicyMode,
+    aiMode: config.aiMode,
+    aiModel: config.aiModel,
+    aiPolicyModel: config.aiPolicyModel,
+    aiStrategyModel: config.aiStrategyModel,
     aiPolicy: persisted.meta?.aiPolicy,
     runtimeConfig: persisted.meta?.runtimeConfig,
     activeSymbol,
@@ -446,22 +449,21 @@ const scoreSnapshot = (snapshot: {
 const looksLeverageToken = (symbol: string) => /(UP|DOWN|BULL|BEAR)$/.test(symbol);
 
 export const refreshBestSymbol = async () => {
-  const baseSymbols = config.allowedSymbols.length ? config.allowedSymbols : [config.defaultSymbol];
+  const baseSymbols = config.tradeUniverse.length ? config.tradeUniverse : [config.defaultSymbol];
   let symbols = [...baseSymbols];
   let discovered: { symbol: string; quoteAsset: string; baseAsset: string }[] = [];
 
-  // If the user provided an explicit allow-list, treat it as the universe for auto-select.
+  // If the user provided an explicit universe, treat it as the universe for auto-select.
   // Auto-discovery is only used to validate/filter tradable SPOT symbols, not to expand the list.
-  if (config.autoDiscoverSymbols && config.allowedSymbols.length === 0) {
+  if (config.autoDiscoverSymbols && config.tradeUniverse.length === 0) {
     try {
       const exchangeSymbols = await fetchTradableSymbols();
 	      discovered = exchangeSymbols
 	        .filter(
 	          (s) =>
 	            isVenueTradable(s) &&
-	            config.allowedQuoteAssets.includes(s.quoteAsset.toUpperCase()) &&
-	            !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
-	            (config.symbolWhitelist.length === 0 || config.symbolWhitelist.includes(s.symbol.toUpperCase())) &&
+	            config.quoteAssets.includes(s.quoteAsset.toUpperCase()) &&
+	            !getSymbolBlockInfo(s.symbol, Date.now()).blocked &&
 	            !isStableToStablePair(s.baseAsset, s.quoteAsset) &&
 	            !looksLeverageToken(s.symbol),
 	        )
@@ -474,19 +476,13 @@ export const refreshBestSymbol = async () => {
     } catch (error) {
       logger.warn({ err: errorToLogObject(error) }, 'Auto-discover failed; falling back to configured symbols');
     }
-  } else if (config.autoDiscoverSymbols && config.allowedSymbols.length > 0) {
+  } else if (config.autoDiscoverSymbols && config.tradeUniverse.length > 0) {
     try {
       const exchangeSymbols = await fetchTradableSymbols();
       const infoBySymbol = new Map(exchangeSymbols.map((s) => [s.symbol.toUpperCase(), s]));
 	      const tradable = new Set(
 	        exchangeSymbols
-	          .filter(
-	            (s) =>
-	              isVenueTradable(s) &&
-	              !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
-	              (config.symbolWhitelist.length === 0 || config.symbolWhitelist.includes(s.symbol.toUpperCase())) &&
-	              !looksLeverageToken(s.symbol),
-	          )
+	          .filter((s) => isVenueTradable(s) && !getSymbolBlockInfo(s.symbol, Date.now()).blocked && !looksLeverageToken(s.symbol))
 	          .map((s) => s.symbol.toUpperCase()),
 	      );
       symbols = baseSymbols
@@ -515,7 +511,7 @@ export const refreshBestSymbol = async () => {
   discovered = discovered.filter((s) => !isBlocked(s.symbol));
 
   // keep it bounded, but pick by liquidity within each quote asset when auto-discovering
-  if (config.allowedSymbols.length === 0 && discovered.length > 0) {
+  if (config.tradeUniverse.length === 0 && discovered.length > 0) {
     const quoteVolumeBySymbol = new Map<string, number>();
     for (const item of discovered) {
       try {
@@ -606,7 +602,7 @@ export const refreshBestSymbol = async () => {
   }
 
   if (!candidates.length) {
-    throw new Error('No symbols could be scored. Check ALLOWED_SYMBOLS or API connectivity.');
+    throw new Error('No symbols could be scored. Check TRADE_UNIVERSE/QUOTE_ASSETS, denylist, or API connectivity.');
   }
 
   candidates.sort((a, b) => b.score - a.score);

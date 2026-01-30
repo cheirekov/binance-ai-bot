@@ -13,7 +13,7 @@ export type SymbolBlockInfo =
   | { blocked: false }
   | {
       blocked: true;
-      code: 'invalid' | 'not_in_whitelist' | 'env_blacklist' | 'account_blacklist' | 'auto_blacklist';
+      code: 'invalid' | 'not_in_universe' | 'denylist' | 'account_blacklist' | 'auto_blacklist';
       reason: string;
       bannedUntil?: number;
       ttlMinutes?: number;
@@ -65,28 +65,58 @@ export const getAutoBlacklist = () => {
   return persisted.meta?.autoBlacklist ?? {};
 };
 
-export const isSymbolAllowedByWhitelist = (symbolInput: string): boolean => {
-  const whitelist = config.symbolWhitelist ?? [];
-  if (!whitelist.length) return true;
-  const sym = (symbolInput ?? '').toUpperCase();
-  return whitelist.includes(sym);
+const deriveQuoteAsset = (symbol: string): string => {
+  const candidates = [...config.quoteAssets, 'BTC', 'BNB', 'ETH'].map((q) => q.toUpperCase());
+  const sym = symbol.toUpperCase();
+  const match = candidates.find((q) => sym.endsWith(q));
+  return match ?? sym.slice(-3);
 };
+
+export const isSymbolViewAllowed = (symbolInput: string): boolean => {
+  const sym = (symbolInput ?? '').toUpperCase();
+  if (!sym || !isSymbolKey(sym)) return false;
+
+  // Always allow viewing symbols that already exist in bot state.
+  if (persisted.grids?.[sym]) return true;
+  if (Object.values(persisted.positions ?? {}).some((p) => (p?.symbol ?? '').toUpperCase() === sym)) return true;
+  if (Object.keys(persisted.strategies ?? {}).some((s) => s.toUpperCase() === sym)) return true;
+  if (Object.keys(persisted.lastTrades ?? {}).some((k) => (k.split(':')[0] ?? '').toUpperCase() === sym)) return true;
+
+  // If the UI knows about a symbol (e.g. ranked candidates), allow viewing it.
+  if ((persisted.meta?.rankedCandidates ?? []).some((c) => (c.symbol ?? '').toUpperCase() === sym)) return true;
+  if ((persisted.meta?.rankedGridCandidates ?? []).some((c) => (c.symbol ?? '').toUpperCase() === sym)) return true;
+
+  // Default to true: view list is already bounded elsewhere (constructed from known symbols).
+  return true;
+};
+
+export const isSymbolTradeAllowed = (symbolInput: string, now = Date.now()): boolean => !getSymbolBlockInfo(symbolInput, now).blocked;
 
 export const getSymbolBlockInfo = (symbolInput: string, now = Date.now()): SymbolBlockInfo => {
   const sym = (symbolInput ?? '').toUpperCase();
   if (!sym || !isSymbolKey(sym)) return { blocked: true, code: 'invalid', reason: 'Invalid symbol key' };
 
-  if (!isSymbolAllowedByWhitelist(sym)) {
+  // Explicit universe (hard allow-list)
+  if (config.tradeUniverse.length > 0 && !config.tradeUniverse.map((s) => s.toUpperCase()).includes(sym)) {
     return {
       blocked: true,
-      code: 'not_in_whitelist',
-      reason: 'Blocked by SYMBOL_WHITELIST',
-      source: 'SYMBOL_WHITELIST',
+      code: 'not_in_universe',
+      reason: 'Not in TRADE_UNIVERSE',
+      source: 'TRADE_UNIVERSE',
     };
   }
 
-  if (config.blacklistSymbols.map((s) => s.toUpperCase()).includes(sym)) {
-    return { blocked: true, code: 'env_blacklist', reason: 'Blocked by BLACKLIST_SYMBOLS', source: 'BLACKLIST_SYMBOLS' };
+  // Always excluded
+  if (config.tradeDenylist.map((s) => s.toUpperCase()).includes(sym)) {
+    return { blocked: true, code: 'denylist', reason: 'Blocked by TRADE_DENYLIST', source: 'TRADE_DENYLIST' };
+  }
+
+  // If universe is auto-discovered (TRADE_UNIVERSE empty), gate trading by quote asset.
+  if (config.tradeUniverse.length === 0) {
+    const quote = deriveQuoteAsset(sym);
+    if (!config.quoteAssets.map((q) => q.toUpperCase()).includes(quote)) {
+      return { blocked: true, code: 'not_in_universe', reason: `Quote asset ${quote} not in QUOTE_ASSETS`, source: 'QUOTE_ASSETS' };
+    }
   }
 
   const account = persisted.meta?.accountBlacklist?.[sym];
@@ -100,7 +130,7 @@ export const getSymbolBlockInfo = (symbolInput: string, now = Date.now()): Symbo
   }
 
   const auto = persisted.meta?.autoBlacklist?.[sym];
-  if (auto && typeof auto.bannedUntil === 'number' && auto.bannedUntil > now) {
+  if (config.autoBlacklistEnabled && auto && typeof auto.bannedUntil === 'number' && auto.bannedUntil > now) {
     return {
       blocked: true,
       code: 'auto_blacklist',
@@ -123,10 +153,10 @@ export const listBlockedSymbols = (): Array<{ symbol: string; info: Exclude<Symb
     out.push({ symbol: symbol.toUpperCase(), info });
   };
 
-  for (const s of config.blacklistSymbols ?? []) {
+  for (const s of config.tradeDenylist ?? []) {
     const sym = s.toUpperCase();
     if (!isSymbolKey(sym)) continue;
-    push(sym, { blocked: true, code: 'env_blacklist', reason: 'Blocked by BLACKLIST_SYMBOLS', source: 'BLACKLIST_SYMBOLS' });
+    push(sym, { blocked: true, code: 'denylist', reason: 'Blocked by TRADE_DENYLIST', source: 'TRADE_DENYLIST' });
   }
 
   for (const [sym, entry] of Object.entries(persisted.meta?.accountBlacklist ?? {})) {

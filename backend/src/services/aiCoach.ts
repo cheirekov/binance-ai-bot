@@ -1,4 +1,3 @@
-import OpenAI from 'openai';
 import { z } from 'zod';
 
 import { get24hStats, getLatestPrice } from '../binance/client.js';
@@ -14,10 +13,10 @@ import { getPersistedState, persistMeta } from './persistence.js';
 import { getPnlReconcile,persistAiCoachLog } from './sqlite.js';
 import { addAutoBlacklistSymbol } from './symbolPolicy.js';
 
+import { callJson } from '../ai/jsonCall.js';
+
 const persisted = getPersistedState();
-const client = config.openAiApiKey
-  ? new OpenAI({ apiKey: config.openAiApiKey, baseURL: config.openAiBaseUrl || undefined })
-  : null;
+// OpenAI client is provided by backend/src/ai/openai.ts via callJson().
 
 let timer: NodeJS.Timeout | null = null;
 let inFlight = false;
@@ -249,8 +248,8 @@ const buildCoachContext = async (now: number) => {
   const candidateSymbols =
     candidatesSeed.length > 0
       ? candidatesSeed.map((c) => c.symbol.toUpperCase())
-      : config.allowedSymbols.length > 0
-        ? config.allowedSymbols.slice(0, 10).map((s) => s.toUpperCase())
+      : config.tradeUniverse.length > 0
+        ? config.tradeUniverse.slice(0, 10).map((s) => s.toUpperCase())
         : [config.defaultSymbol.toUpperCase()];
 
   const candidateStats = await Promise.all(
@@ -300,12 +299,13 @@ const buildCoachContext = async (now: number) => {
       tradeHalted: false, // derived by strategy endpoints; coach keeps conservative
       dailyLossCapPct: config.dailyLossCapPct,
     },
-    symbolPolicy: {
-      whitelist: config.symbolWhitelist ?? [],
-      envBlacklist: config.blacklistSymbols ?? [],
-      accountBlacklist: Object.keys(persisted.meta?.accountBlacklist ?? {})
+    universe: {
+      mode: config.tradeUniverse.length > 0 ? 'static' : 'discovery',
+      tradeUniverse: config.tradeUniverse.slice(0, 80),
+      tradeDenylist: config.tradeDenylist.slice(0, 80),
+      accountDenylist: Object.keys(persisted.meta?.accountBlacklist ?? {})
         .map((s) => s.toUpperCase())
-        .slice(0, 50),
+        .slice(0, 80),
       autoBlacklist: Object.entries(persisted.meta?.autoBlacklist ?? {})
         .map(([symbol, entry]) => ({
           symbol: symbol.toUpperCase(),
@@ -313,7 +313,8 @@ const buildCoachContext = async (now: number) => {
           reason: entry.reason ?? 'auto_blacklist',
         }))
         .filter((e) => typeof e.bannedUntil === 'number' && e.bannedUntil > now)
-        .slice(0, 50),
+        .slice(0, 80),
+      top10: candidateStats,
     },
     autonomy: {
       profile: config.aiAutonomyProfile,
@@ -360,7 +361,6 @@ const buildCoachContext = async (now: number) => {
       },
       runtimeOverrides: persisted.meta?.runtimeConfig ?? null,
     },
-    universe: { top10: candidateStats },
     grids,
     news: { sentiment: news.sentiment, headlines: news.headlines.slice(0, 6) },
   };
@@ -415,12 +415,12 @@ export const runAiCoachOnce = async (): Promise<AiCoachSnapshot> => {
     return snap;
   }
 
-  if (!client) {
+  if (!config.aiApiKey) {
     const snap: AiCoachSnapshot = {
       ...baseSnapshot,
       skipped: true,
-      skipReason: 'OpenAI not configured (OPENAI_API_KEY missing).',
-      notes: ['Set OPENAI_API_KEY to enable AI Coach.'],
+      skipReason: 'AI not configured (AI_API_KEY missing).',
+      notes: ['Set AI_API_KEY to enable AI Coach.'],
     };
     persistMeta(persisted, { latestCoach: snap });
     persistAiCoachLog({ at: now, profile: snap.profile, governorState, confidence: snap.confidence, proposals: [], applied: [], notes: snap.notes, model: snap.model });
@@ -430,18 +430,22 @@ export const runAiCoachOnce = async (): Promise<AiCoachSnapshot> => {
   try {
     const ctx = await buildCoachContext(now);
 
-    const completion = await client.chat.completions.create({
+    const res = await callJson({
+      schema: coachSchema,
       model: config.aiPolicyModel,
       temperature: 0.2,
-      response_format: { type: 'json_object' },
+      timeoutMs: 90_000,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: buildUserPrompt(ctx) },
       ],
     });
 
-    const raw = completion.choices[0]?.message?.content ?? '{}';
-    const parsed = coachSchema.parse(JSON.parse(raw)) as z.infer<typeof coachSchema>;
+    if (!res.ok) {
+      throw new Error(res.error);
+    }
+
+    const parsed = res.data as z.infer<typeof coachSchema>;
 
     const proposalRecords: AiCoachProposalRecord[] = [];
 

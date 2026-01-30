@@ -14,28 +14,35 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Optional AI policy (gated): LLM can propose OPEN/CLOSE/HOLD/PANIC and bounded parameter tuning; engine still validates and enforces caps.
 - AI Coach (slow loop): periodically reviews compact summaries (governor, PnL, grids, candidates, news) and proposes bounded tuning / grid actions / symbol bans.
 - AI Autonomy Profiles: `safe | standard | pro | aggressive` control what the coach may auto-apply (risk tightening is allowed; risk relaxation is opt-in + bounded).
-- Symbol policy: optional `SYMBOL_WHITELIST` (hard allow-list) + dynamic auto-blacklist TTL bans (best-effort; persisted in `state.json` + SQLite when enabled).
+- Universe policy: `TRADE_UNIVERSE` (explicit allow-list; optional) + `QUOTE_ASSETS` discovery filter + `TRADE_DENYLIST`.
 - Optional SQLite persistence for analytics/learning (features, decisions, trades, grid fills, equity snapshots, conversion events) stored under the Docker volume (`/app/data`).
 - PnL reconciliation: `/stats/pnl_reconcile` and a Portfolio “PnL breakdown” card help explain why grid performance is not equal to total account PnL.
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
+## Quick start (spot, Docker)
 
-## Quick start (local)
-1) Copy env: `cp .env.example .env` (or start from `cp .env.spot.example .env` / `cp .env.future.example .env`) and fill `BINANCE_API_KEY/SECRET` (use restricted keys) and `OPENAI_API_KEY`. Keep `TRADING_ENABLED=false` until ready.
-   - EU-friendly quotes: `QUOTE_ASSET=USDC` and `ALLOWED_QUOTES=USDC,EUR`.
-   - For full discovery, leave `ALLOWED_SYMBOLS=` empty. If you set `ALLOWED_SYMBOLS`, the bot will only scan/trade within that allow-list.
+See: **[docs/QUICKSTART_SPOT.md](./docs/QUICKSTART_SPOT.md)**
+
+Basic setup:
+
+```bash
+cp .env.spot.basic.example .env
+docker-compose up --build
+```
+   - Universe discovery is controlled by `QUOTE_ASSETS`.
+   - For full discovery, leave `TRADE_UNIVERSE=` empty. If you set `TRADE_UNIVERSE`, the bot will only open new trades within that list.
    - Auto-trading requires both `AUTO_TRADE_ENABLED=true` and `TRADING_ENABLED=true`.
    - Futures (advanced, higher risk): set `TRADE_VENUE=futures`, provide a key with futures permissions, and set `FUTURES_ENABLED=true`. Start with low leverage (e.g. `FUTURES_LEVERAGE=2`) and test on futures testnet first.
    - Portfolio mode (optional): set `PORTFOLIO_ENABLED=true`, choose `HOME_ASSET` (e.g. `USDC`), and optionally `CONVERSION_ENABLED=true` if you allow auto-converting into BTC/XRP quotes.
    - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only** and only run on symbols quoted in `HOME_ASSET` (e.g. `BTCUSDC` if `HOME_ASSET=USDC`). Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC`.
-   - AI policy (optional): set `AI_POLICY_MODE=advisory` (no trading) or `AI_POLICY_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
+   - AI policy (optional): set `AI_MODE=advisory` (no auto execution) or `AI_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
      - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.
      - Grid allocation tuning via `GRID_MAX_ALLOC_PCT` is additionally clamped: `AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY` limits how much the AI can increase it per day (decreases are allowed).
      - Risk relaxation is **disabled by default**: `AI_POLICY_ALLOW_RISK_RELAXATION=false` blocks AI actions that increase risk (e.g. `RESUME_GRID`). Enable it only with explicit operator approval.
-   - AI Coach (slow loop): enabled by default when `AI_POLICY_MODE!=off`. Configure:
+   - AI Coach (slow loop): enabled by default when `AI_MODE!=off`. Configure:
      - `AI_AUTONOMY_PROFILE` controls auto-apply capabilities (safe default: `safe`)
      - `AI_COACH_INTERVAL_SECONDS` (default 600) and `AI_COACH_MIN_EQUITY_USD` (default 200)
      - `*_RANGE` envelope vars (extra safety bounds for AI tuning changes)
-   - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `OPENAI_BASE_URL` (for example: local `ollama`, `llama.cpp` server, or `vLLM`).
+   - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `AI_BASE_URL`.
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.
 3) Start API: `npm run dev --workspace backend` (listens on `8788`).

@@ -104,7 +104,9 @@ export const StrategyPage = (props: { data: StrategyResponse | null; selectedSym
         <Card eyebrow="Mode" title="Summary">
           <div className="chip-row">
             <Chip tone="info">Venue: {props.data?.tradeVenue ?? 'spot'}</Chip>
-            <Chip tone={props.data?.aiPolicyMode && props.data.aiPolicyMode !== 'off' ? 'good' : 'neutral'}>AI: {props.data?.aiPolicyMode ?? 'off'}</Chip>
+            <Chip tone={(props.data?.aiMode ?? props.data?.aiPolicyMode) && (props.data?.aiMode ?? props.data?.aiPolicyMode) !== 'off' ? 'good' : 'neutral'}>
+              AI Mode: {props.data?.aiMode ?? props.data?.aiPolicyMode ?? 'off'}
+            </Chip>
             <Chip tone={props.data?.gridEnabled ? 'good' : 'neutral'}>Grid: {props.data?.gridEnabled ? 'On' : 'Off'}</Chip>
             <Chip tone={props.data?.portfolioEnabled ? 'good' : 'neutral'}>Portfolio: {props.data?.portfolioEnabled ? 'On' : 'Off'}</Chip>
           </div>

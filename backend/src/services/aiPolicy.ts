@@ -1,4 +1,3 @@
-import OpenAI from 'openai';
 import { z } from 'zod';
 
 import { get24hStats, getBalances } from '../binance/client.js';
@@ -11,10 +10,10 @@ import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta } from './persistence.js';
 import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
+import { callJson } from '../ai/jsonCall.js';
+
 const persisted = getPersistedState();
-const client = config.openAiApiKey
-  ? new OpenAI({ apiKey: config.openAiApiKey, baseURL: config.openAiBaseUrl || undefined })
-  : null;
+// OpenAI client is provided by backend/src/ai/openai.ts via callJson().
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
@@ -59,7 +58,7 @@ const canCallPolicyNow = (now: number) => {
 const buildCandidates = async (seedSymbol?: string) => {
   const ranked = persisted.meta?.rankedCandidates ?? [];
   const base = ranked.map((c) => c.symbol.toUpperCase());
-  const initial = base.length ? base : config.allowedSymbols.map((s) => s.toUpperCase());
+  const initial = base.length ? base : (config.tradeUniverse ?? []).map((s: string) => s.toUpperCase());
   const merged = Array.from(new Set([seedSymbol?.toUpperCase(), ...initial].filter(Boolean) as string[]));
 
   const now = Date.now();
@@ -156,7 +155,7 @@ const summarizeBalances = (balances: Balance[], max = 12) => {
 
 const computeProtectedAssets = (homeAsset: string) => {
   const protectedAssets = new Set<string>([homeAsset.toUpperCase()]);
-  for (const asset of config.allowedQuoteAssets) protectedAssets.add(asset.toUpperCase());
+  for (const asset of config.quoteAssets) protectedAssets.add(asset.toUpperCase());
   protectedAssets.add(config.quoteAsset.toUpperCase());
   for (const pos of Object.values(persisted.positions)) {
     if (!pos) continue;
@@ -219,7 +218,7 @@ ${JSON.stringify(payload, null, 2)}
 Decide now.`;
 
 export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision | null> => {
-  if (config.aiPolicyMode === 'off') return null;
+  if (config.aiMode === 'off') return null;
 
   const now = Date.now();
   const gate = canCallPolicyNow(now);
@@ -228,13 +227,14 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
   const meta = getPolicyMeta();
   const nextMeta = { ...meta, lastAt: now, calls: meta.calls + 1 };
 
-  if (!client) {
+  // If AI is not configured (no key), keep existing behavior: emit a HOLD decision snapshot.
+  if (!config.aiApiKey) {
     const decision: AiPolicyDecision = {
       at: now,
-      mode: config.aiPolicyMode,
+      mode: config.aiMode,
       action: 'HOLD',
       confidence: 0.2,
-      reason: 'OpenAI is not configured (OPENAI_API_KEY missing).',
+      reason: 'AI is not configured (AI_API_KEY missing).',
       model: config.aiPolicyModel,
     };
     persistMeta(persisted, { aiPolicy: { ...nextMeta, lastDecision: decision } });
@@ -337,22 +337,26 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
       unusedAssets,
     };
 
-    const completion = await client.chat.completions.create({
+    const res = await callJson({
+      schema: decisionSchema,
       model: config.aiPolicyModel,
       temperature: 0.2,
-      response_format: { type: 'json_object' },
+      timeoutMs: 60_000,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt(payload) },
       ],
     });
 
-    const raw = completion.choices[0]?.message?.content ?? '{}';
-    const parsed = decisionSchema.parse(JSON.parse(raw)) as z.infer<typeof decisionSchema>;
+    if (!res.ok) {
+      throw new Error(res.error);
+    }
+
+    const parsed = res.data as z.infer<typeof decisionSchema>;
 
     const decision: AiPolicyDecision = {
       at: now,
-      mode: config.aiPolicyMode,
+      mode: config.aiMode,
       action: parsed.action,
       symbol: parsed.symbol?.toUpperCase(),
       horizon: parsed.horizon as Horizon | undefined,
@@ -370,7 +374,7 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
     logger.warn({ err: errorToLogObject(error) }, 'AI policy call failed');
     const decision: AiPolicyDecision = {
       at: now,
-      mode: config.aiPolicyMode,
+      mode: config.aiMode,
       action: 'HOLD',
       confidence: 0.3,
       reason: `AI policy error: ${errorToString(error)}`.slice(0, 400),

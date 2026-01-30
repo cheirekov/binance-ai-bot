@@ -16,7 +16,7 @@ import { logger } from '../logger.js';
 import { AiPolicyTuning, Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { resolveAutonomy } from './aiAutonomy.js';
-import { runAiPolicy } from './aiPolicy.js';
+import { runAiPolicy } from '../ai/policy.js';
 import { applyAiTuning } from './aiTuning.js';
 import { pauseGridBuys, resumeGridBuys, startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
@@ -91,7 +91,7 @@ const recordDecision = (decision: AutoTradeDecision) => {
     horizon: decision.horizon,
     action: decision.action,
     reason: decision.reason,
-    mode: config.aiPolicyMode,
+    mode: config.aiMode,
     orderId: decision.orderId,
   });
 };
@@ -1142,8 +1142,8 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
     if (pos.ocoOrderListId) byOrderListId.set(pos.ocoOrderListId, key);
   }
 
-  const allowedSymbolSet = new Set(config.allowedSymbols.map((s) => s.toUpperCase()));
-  const allowedQuoteSet = new Set(config.allowedQuoteAssets.map((s) => s.toUpperCase()));
+  const allowedSymbolSet = new Set(config.tradeUniverse.map((s) => s.toUpperCase()));
+  const allowedQuoteSet = new Set(config.quoteAssets.map((s) => s.toUpperCase()));
   const openOrderListIds = new Set<number>();
 
   for (const oco of openOcos) {
@@ -1172,7 +1172,7 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
     const baseAsset = (info?.baseAsset ?? '').toUpperCase();
     if (!quoteAsset || !baseAsset) continue;
 
-    const isAllowed = config.allowedSymbols.length > 0 ? allowedSymbolSet.has(symbol) : allowedQuoteSet.has(quoteAsset);
+    const isAllowed = config.tradeUniverse.length > 0 ? allowedSymbolSet.has(symbol) : allowedQuoteSet.has(quoteAsset);
     if (!isAllowed) continue;
 
     // Try to infer horizon from lastTrades; fallback to short.
@@ -2083,7 +2083,7 @@ export const autoTradeTick = async (symbol?: string) => {
     governor?.state ?? null,
   );
 
-  if (config.aiPolicyMode === 'advisory') {
+  if (config.aiMode === 'advisory') {
     const aiDecisionRaw = await runAiPolicy(symbol);
     const aiDecision =
       aiDecisionRaw && !entriesAllowedByGovernor && aiDecisionRaw.action === 'OPEN'
@@ -2117,7 +2117,7 @@ export const autoTradeTick = async (symbol?: string) => {
   }
 
   const aiDecision = await runAiPolicy(symbol);
-  if (config.aiPolicyMode === 'gated-live' && !aiDecision) {
+  if (config.aiMode === 'gated-live' && !aiDecision) {
     // If AI policy is enabled but rate-limited/unavailable, hold (manage exits, no new entries).
     if (config.gridEnabled) {
       await startOrSyncGrids();
@@ -2136,7 +2136,7 @@ export const autoTradeTick = async (symbol?: string) => {
   }
 
   try {
-	    if (config.aiPolicyMode === 'gated-live' && aiDecision) {
+	    if (config.aiMode === 'gated-live' && aiDecision) {
 	      if (
 	        config.aiPolicyTuningAutoApply &&
 	        aiDecision.tune &&

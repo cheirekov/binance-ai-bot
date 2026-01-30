@@ -112,12 +112,16 @@ const parseRangeFromEnv = (
   return { min, max };
 };
 
-const aiPolicyModeFromEnv = () => oneOf(process.env.AI_POLICY_MODE, ['off', 'advisory', 'gated-live'] as const, 'off');
+const aiModeFromEnv = () => oneOf(process.env.AI_MODE, ['off', 'advisory', 'gated-live'] as const, 'off');
 
 const isAiEnabledByEnv = () => {
-  const mode = aiPolicyModeFromEnv();
+  const mode = aiModeFromEnv();
   return mode !== 'off';
 };
+
+const aiModelFromEnv = () => stringFromEnv(process.env.AI_MODEL, 'gpt-4.1-mini');
+const aiPolicyModelFromEnv = () => optionalStringFromEnv(process.env.AI_POLICY_MODEL) || aiModelFromEnv();
+const aiStrategyModelFromEnv = () => optionalStringFromEnv(process.env.AI_STRATEGY_MODEL) || aiModelFromEnv();
 
 export type AiAutonomyProfile = 'safe' | 'standard' | 'pro' | 'aggressive';
 
@@ -136,23 +140,22 @@ export const config = {
     ? 'CROSSED'
     : 'ISOLATED') as 'ISOLATED' | 'CROSSED',
   tradingEnabled: boolFromEnv(process.env.TRADING_ENABLED, false),
-  openAiApiKey: optionalStringFromEnv(process.env.OPENAI_API_KEY),
-  openAiModel: stringFromEnv(process.env.OPENAI_MODEL, 'gpt-4.1-mini'),
-  openAiBaseUrl: optionalStringFromEnv(process.env.OPENAI_BASE_URL),
+
+  // AI (OpenAI-compatible)
+  aiApiKey: optionalStringFromEnv(process.env.AI_API_KEY),
+  aiBaseUrl: optionalStringFromEnv(process.env.AI_BASE_URL),
+  aiModel: aiModelFromEnv(),
+  aiPolicyModel: aiPolicyModelFromEnv(),
+  aiStrategyModel: aiStrategyModelFromEnv(),
+
   defaultSymbol: stringFromEnv(process.env.SYMBOL, 'BTCEUR').toUpperCase(),
   quoteAsset: stringFromEnv(process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
   homeAsset: stringFromEnv(process.env.HOME_ASSET ?? process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
-  allowedSymbols: listFromEnvUpper(process.env.ALLOWED_SYMBOLS, [
-    'BTCEUR',
-    'ETHEUR',
-    'BTCUSDT',
-    'ETHUSDT',
-    'BTCUSDC',
-    'ETHUSDC',
-    'SOLUSDT',
-    'BNBUSDT',
-  ]),
-  allowedQuoteAssets: listFromEnvUpper(process.env.ALLOWED_QUOTES, ['USDT', 'USDC', 'EUR']),
+  // Trade universe (controls candidates + execution gate)
+  tradeUniverse: listFromEnvUpper(process.env.TRADE_UNIVERSE, []),
+  quoteAssets: listFromEnvUpper(process.env.QUOTE_ASSETS, ['USDT', 'USDC', 'EUR']),
+  tradeDenylist: listFromEnvUpper(process.env.TRADE_DENYLIST, []),
+
   universeMaxSymbols: numberFromEnv(process.env.UNIVERSE_MAX_SYMBOLS, 50),
   maxPositionSizeUsdt: numberFromEnv(process.env.MAX_POSITION_SIZE_USDT, 200),
   riskPerTradeBasisPoints: numberFromEnv(process.env.RISK_PER_TRADE_BP, 50),
@@ -167,8 +170,6 @@ export const config = {
   ),
   newsCacheMinutes: numberFromEnv(process.env.NEWS_CACHE_MINUTES, 15),
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
-  blacklistSymbols: listFromEnvUpper(process.env.BLACKLIST_SYMBOLS, []),
-  symbolWhitelist: listFromEnvUpper(process.env.SYMBOL_WHITELIST, []),
   autoBlacklistEnabled: boolFromEnv(process.env.AUTO_BLACKLIST_ENABLED, true),
   autoBlacklistTtlMinutes: Math.max(5, Math.floor(numberFromEnv(process.env.AUTO_BLACKLIST_TTL_MIN, 360))),
   autoBlacklistTriggers: (() => {
@@ -238,8 +239,7 @@ export const config = {
   gridResumeTicks: Math.max(1, Math.floor(numberFromEnv(process.env.GRID_RESUME_TICKS, 3))),
   gridResumeMinutes: Math.max(0, numberFromEnv(process.env.GRID_RESUME_MINUTES, 5)),
 
-  aiPolicyMode: aiPolicyModeFromEnv(),
-  aiPolicyModel: optionalStringFromEnv(process.env.AI_POLICY_MODEL) || optionalStringFromEnv(process.env.OPENAI_MODEL) || 'gpt-4.1-mini',
+  aiMode: aiModeFromEnv(),
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),

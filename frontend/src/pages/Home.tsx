@@ -256,7 +256,10 @@ export const HomePage = (props: {
           )}
         </Card>
 
-        <Card eyebrow="Bot intent" title={props.data?.aiPolicyMode && props.data.aiPolicyMode !== 'off' ? 'AI policy' : 'Strategy'}>
+        <Card
+          eyebrow="Bot intent"
+          title={(props.data?.aiMode ?? props.data?.aiPolicyMode) && (props.data?.aiMode ?? props.data?.aiPolicyMode) !== 'off' ? 'AI policy' : 'Strategy'}
+        >
           <div className="intent">
             <div className={`intent-decision intent-${intent.decision.toLowerCase()}`}>{intent.decision}</div>
             <div className="muted">

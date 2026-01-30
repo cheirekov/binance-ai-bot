@@ -10,7 +10,7 @@ import { healthRoutes } from './routes/health.js';
 import { ordersRoutes } from './routes/orders.js';
 import { statsRoutes } from './routes/stats.js';
 import { strategyRoutes } from './routes/strategy.js';
-import { startAiCoach } from './services/aiCoach.js';
+import { startAiCoach } from './ai/coach.js';
 import { startScheduler } from './services/scheduler.js';
 import { initSqliteBestEffort } from './services/sqlite.js';
 
