@@ -9,6 +9,7 @@ import { AiPolicyDecision, AiPolicyTuning, Balance, Horizon } from '../types.js'
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta } from './persistence.js';
+import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const persisted = getPersistedState();
 const client = config.openAiApiKey
@@ -61,7 +62,9 @@ const buildCandidates = async (seedSymbol?: string) => {
   const initial = base.length ? base : config.allowedSymbols.map((s) => s.toUpperCase());
   const merged = Array.from(new Set([seedSymbol?.toUpperCase(), ...initial].filter(Boolean) as string[]));
 
-  const blocked = new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
+  const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
   const gridRunning = new Set(Object.values(persisted.grids ?? {}).filter((g) => g?.status === 'running').map((g) => g.symbol.toUpperCase()));
 
   const symbols = await fetchTradableSymbols();
@@ -79,7 +82,7 @@ const buildCandidates = async (seedSymbol?: string) => {
   }> = [];
 
   for (const sym of merged.slice(0, Math.max(1, config.aiPolicyMaxCandidates))) {
-    if (blocked.has(sym)) continue;
+    if (isBlocked(sym)) continue;
     if (!allowed.has(sym)) continue;
     if (gridRunning.has(sym)) continue;
     try {

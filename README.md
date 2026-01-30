@@ -12,6 +12,9 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Risk Governor (account-level): state machine `NORMAL/CAUTION/HALT` driven by mark-to-market equity drawdown, trend regime, and fee burn (computed from live balances + tickers + `state.json`, not SQLite).
 - Grid Guard (per-grid): detects trend / falling-knife / vol spike regimes and automatically pauses **new grid BUYs** while keeping SELLs active to unwind.
 - Optional AI policy (gated): LLM can propose OPEN/CLOSE/HOLD/PANIC and bounded parameter tuning; engine still validates and enforces caps.
+- AI Coach (slow loop): periodically reviews compact summaries (governor, PnL, grids, candidates, news) and proposes bounded tuning / grid actions / symbol bans.
+- AI Autonomy Profiles: `safe | standard | pro | aggressive` control what the coach may auto-apply (risk tightening is allowed; risk relaxation is opt-in + bounded).
+- Symbol policy: optional `SYMBOL_WHITELIST` (hard allow-list) + dynamic auto-blacklist TTL bans (best-effort; persisted in `state.json` + SQLite when enabled).
 - Optional SQLite persistence for analytics/learning (features, decisions, trades, grid fills, equity snapshots, conversion events) stored under the Docker volume (`/app/data`).
 - PnL reconciliation: `/stats/pnl_reconcile` and a Portfolio “PnL breakdown” card help explain why grid performance is not equal to total account PnL.
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
@@ -28,6 +31,10 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
      - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.
      - Grid allocation tuning via `GRID_MAX_ALLOC_PCT` is additionally clamped: `AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY` limits how much the AI can increase it per day (decreases are allowed).
      - Risk relaxation is **disabled by default**: `AI_POLICY_ALLOW_RISK_RELAXATION=false` blocks AI actions that increase risk (e.g. `RESUME_GRID`). Enable it only with explicit operator approval.
+   - AI Coach (slow loop): enabled by default when `AI_POLICY_MODE!=off`. Configure:
+     - `AI_AUTONOMY_PROFILE` controls auto-apply capabilities (safe default: `safe`)
+     - `AI_COACH_INTERVAL_SECONDS` (default 600) and `AI_COACH_MIN_EQUITY_USD` (default 200)
+     - `*_RANGE` envelope vars (extra safety bounds for AI tuning changes)
    - Non-OpenAI models (optional): if your provider supports the OpenAI API format, set `OPENAI_BASE_URL` (for example: local `ollama`, `llama.cpp` server, or `vLLM`).
    - If you deploy the UI, set `BASIC_AUTH_USER/PASS` and `API_KEY/CLIENT_KEY`.
 2) Install: `npm install`.
@@ -38,7 +45,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 Build and run both services:
 ```bash
 cp .env.example .env   # set keys
-docker-compose up --build
+npm run docker:up
 ```
 - API: `http://localhost:8788`
 - Web UI: `http://localhost:4173`
@@ -71,6 +78,7 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - `GET /stats/performance` — read-only performance stats (requires `PERSIST_TO_SQLITE=true`)
 - `GET /stats/pnl_reconcile?window=24h` — explainable PnL breakdown (equity change vs grid/portfolio realized+unrealized, fees, conversions, residual). Best with `PERSIST_TO_SQLITE=true`.
 - `GET /stats/db` — SQLite health (requires `PERSIST_TO_SQLITE=true`; returns table counts + last write timestamp)
+- `GET /stats/ai_coach` — latest AI Coach proposals + applied flags (best-effort; also surfaced in `/strategy`)
 
 ## Notes and safety
 - The bot estimates Binance spot fees (0.1% maker/taker) and limits size via `MAX_POSITION_SIZE_USDT` + `RISK_PER_TRADE_BP`.
@@ -101,5 +109,13 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
   - Verify: no market exits occur unless `RISK_HALT_MARKET_EXIT=true`.
 - AI policy is **gated**: it can only choose actions/symbols from data the bot provides, and the engine still enforces exchange rules (minQty/minNotional), risk flags, allocation caps, and daily loss caps. It can still lose money—test on small size or testnet first.
   - Risk increases proposed by AI are blocked unless `AI_POLICY_ALLOW_RISK_RELAXATION=true` (default false).
+- AI Coach loop runs separately from the fast trading loop:
+  - Fast loop (`REFRESH_SECONDS`): refresh strategies, run Risk Governor, run auto-trader, sync trades.
+  - Coach loop (`AI_COACH_INTERVAL_SECONDS`): propose bounded tuning / symbol bans / grid actions. Auto-apply is limited by `AI_AUTONOMY_PROFILE` + hard safety gates.
+- Hard safety gates are always enforced in code (AI cannot bypass):
+  - `TRADING_ENABLED` (and `FUTURES_ENABLED` for futures) must be true for real orders
+  - `DAILY_LOSS_CAP_PCT` triggers `emergencyStop` and blocks new entries
+  - Risk Governor `CAUTION/HALT` blocks risk increases (coach relaxations/resumes require governor `NORMAL`)
+  - AI tuning envelope (`*_RANGE`) clamps any AI-origin tuning changes
 - State is persisted to `PERSISTENCE_PATH` (default `./data/state.json`) so the bot resumes last strategies/balances after restart.
 - Optional analytics persistence: set `PERSIST_TO_SQLITE=true` and `SQLITE_PATH=/app/data/bot.sqlite` to store features/decisions/trades inside the existing Docker volume (`./data:/app/data`). SQLite failures are best-effort and never block trading.

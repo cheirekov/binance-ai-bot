@@ -5,14 +5,16 @@ import { logger } from '../logger.js';
 import { buildStrategyBundle } from '../strategy/engine.js';
 import { Balance, RiskSettings, StrategyResponsePayload, StrategyState } from '../types.js';
 import { errorToLogObject } from '../utils/errors.js';
+import { resolveAutonomy } from './aiAutonomy.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta, persistStrategy } from './persistence.js';
+import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
-const riskSettings: RiskSettings = {
+const currentRiskSettings = (): RiskSettings => ({
   maxPositionSizeUsdt: config.maxPositionSizeUsdt,
   riskPerTradeFraction: config.riskPerTradeBasisPoints / 10000,
   feeRate,
-};
+});
 
 const stateBySymbol: Record<string, StrategyState> = {};
 const persisted = getPersistedState();
@@ -49,9 +51,6 @@ const isStableLikeAsset = (asset: string) => {
 const isStableToStablePair = (baseAsset: string, quoteAsset: string) =>
   isStableLikeAsset(baseAsset) && isStableLikeAsset(quoteAsset);
 
-const accountBlacklistSet = () =>
-  new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
-
 const isVenueTradable = (s: Awaited<ReturnType<typeof fetchTradableSymbols>>[number]) => {
   if (config.tradeVenue === 'futures') {
     // USD-M futures exchangeInfo contains contractType; we only trade perpetual contracts.
@@ -61,10 +60,18 @@ const isVenueTradable = (s: Awaited<ReturnType<typeof fetchTradableSymbols>>[num
 };
 
 const ensureActiveSymbolAllowed = () => {
-  const blocked = accountBlacklistSet();
+  const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
   const activeUpper = activeSymbol.toUpperCase();
-  if (blocked.has(activeUpper)) {
-    const fallback = [config.defaultSymbol.toUpperCase()].find((s) => !blocked.has(s));
+  if (getSymbolBlockInfo(activeUpper, now).blocked) {
+    const pool = [
+      config.defaultSymbol,
+      ...config.allowedSymbols,
+      ...(persisted.meta?.rankedCandidates?.map((c) => c.symbol) ?? []),
+    ]
+      .map((s) => s.toUpperCase())
+      .filter(Boolean);
+    const fallback = pool.find((s) => !getSymbolBlockInfo(s, now).blocked);
     if (fallback) {
       activeSymbol = fallback;
       persistMeta(persisted, { activeSymbol });
@@ -258,7 +265,7 @@ export const refreshStrategies = async (symbolInput?: string, options?: { useAi?
       // ignore (best-effort; execution layer still enforces exchange rules)
     }
 
-    state.strategies = await buildStrategyBundle(market, riskSettings, news.sentiment, quoteToHome ?? 1, {
+    state.strategies = await buildStrategyBundle(market, currentRiskSettings(), news.sentiment, quoteToHome ?? 1, {
       ...(options ?? {}),
       symbolRules,
     });
@@ -282,13 +289,16 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
   } catch {
     symbol = normalizeSymbol();
   }
-  const blocked = accountBlacklistSet();
-  if (symbolInput && blocked.has(symbol.toUpperCase())) {
+  const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
+
+  if (symbolInput && isBlocked(symbol.toUpperCase())) {
     // If a user selects a blacklisted symbol in the UI (e.g., stored in localStorage),
     // transparently return the active/default symbol instead.
     const fallback = [activeSymbol, config.defaultSymbol]
       .map((s) => s.toUpperCase())
-      .find((s) => !blocked.has(s));
+      .find((s) => !isBlocked(s));
     if (fallback) {
       symbol = normalizeSymbol(fallback);
     }
@@ -300,8 +310,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
       : lastCandidates.length > 0
         ? lastCandidates.map((c) => c.symbol)
         : Object.keys(stateBySymbol);
-  const rankedCandidates = lastCandidates.filter((c) => !blocked.has(c.symbol.toUpperCase()));
-  const rankedGridCandidates = (persisted.meta?.rankedGridCandidates ?? []).filter((c) => !blocked.has(c.symbol.toUpperCase()));
+  const rankedCandidates = lastCandidates.filter((c) => !isBlocked(c.symbol.toUpperCase()));
+  const rankedGridCandidates = (persisted.meta?.rankedGridCandidates ?? []).filter((c) => !isBlocked(c.symbol.toUpperCase()));
   const positionsForVenue = Object.fromEntries(
     Object.entries(persisted.positions).filter(([, p]) => (p?.venue ?? 'spot') === config.tradeVenue),
   );
@@ -324,7 +334,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
   for (const s of positionSymbols) addSymbol(s);
 
   const availableSymbols = Array.from(symbolSet)
-    .filter((s) => !blocked.has(s.toUpperCase()))
+    .filter((s) => !isBlocked(s.toUpperCase()))
     .sort((a, b) => a.localeCompare(b));
 
   return {
@@ -333,7 +343,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     market: state.market,
     balances: state.balances,
     strategies: state.strategies,
-    risk: riskSettings,
+    risk: currentRiskSettings(),
     quoteAsset: config.quoteAsset,
     minQuoteVolume: config.minQuoteVolume,
     maxVolatilityPercent: config.maxVolatilityPercent,
@@ -348,6 +358,44 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     tradingEnabled: config.tradingEnabled,
     autoTradeEnabled: config.autoTradeEnabled,
     homeAsset: config.homeAsset,
+    symbolPolicy: {
+      whitelist: config.symbolWhitelist ?? [],
+      envBlacklist: config.blacklistSymbols ?? [],
+      accountBlacklist: Object.entries(persisted.meta?.accountBlacklist ?? {})
+        .map(([symbol, row]) => ({ symbol: symbol.toUpperCase(), at: row.at ?? 0, reason: row.reason ?? 'account_blacklist' }))
+        .filter((r) => r.symbol)
+        .sort((a, b) => a.symbol.localeCompare(b.symbol)),
+      autoBlacklist: Object.entries(persisted.meta?.autoBlacklist ?? {})
+        .map(([symbol, row]) => ({
+          symbol: symbol.toUpperCase(),
+          at: row.at ?? 0,
+          bannedUntil: row.bannedUntil ?? 0,
+          ttlMinutes: row.ttlMinutes ?? 0,
+          reason: row.reason ?? 'auto_blacklist',
+          source: row.source ?? undefined,
+          triggers: row.triggers ?? undefined,
+        }))
+        .filter((r) => r.symbol && typeof r.bannedUntil === 'number' && r.bannedUntil > now)
+        .sort((a, b) => a.symbol.localeCompare(b.symbol)),
+    },
+    aiAutonomy: {
+      profile: config.aiAutonomyProfile,
+      capabilities: resolveAutonomy(
+        config.aiAutonomyProfile,
+        {
+          aiPolicyAllowRiskRelaxation: config.aiPolicyAllowRiskRelaxation,
+          aiPolicySweepAutoApply: config.aiPolicySweepAutoApply,
+          autoBlacklistEnabled: config.autoBlacklistEnabled,
+        },
+        persisted.meta?.riskGovernor?.decision?.state ?? null,
+      ),
+    },
+    aiCoach: {
+      enabled: config.aiCoachEnabled,
+      intervalSeconds: config.aiCoachIntervalSeconds,
+      minEquityUsd: config.aiCoachMinEquityUsd,
+      latest: persisted.meta?.latestCoach ?? null,
+    },
     portfolioEnabled: config.portfolioEnabled,
     portfolioMaxAllocPct: config.portfolioMaxAllocPct,
     portfolioMaxPositions: config.portfolioMaxPositions,
@@ -377,7 +425,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
   };
 };
 
-export const getRiskSettings = () => riskSettings;
+export const getRiskSettings = () => currentRiskSettings();
 
 const scoreSnapshot = (snapshot: {
   priceChangePercent: number;
@@ -407,16 +455,17 @@ export const refreshBestSymbol = async () => {
   if (config.autoDiscoverSymbols && config.allowedSymbols.length === 0) {
     try {
       const exchangeSymbols = await fetchTradableSymbols();
-      discovered = exchangeSymbols
-        .filter(
-          (s) =>
-            isVenueTradable(s) &&
-            config.allowedQuoteAssets.includes(s.quoteAsset.toUpperCase()) &&
-            !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
-            !isStableToStablePair(s.baseAsset, s.quoteAsset) &&
-            !looksLeverageToken(s.symbol),
-        )
-        .map((s) => ({
+	      discovered = exchangeSymbols
+	        .filter(
+	          (s) =>
+	            isVenueTradable(s) &&
+	            config.allowedQuoteAssets.includes(s.quoteAsset.toUpperCase()) &&
+	            !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
+	            (config.symbolWhitelist.length === 0 || config.symbolWhitelist.includes(s.symbol.toUpperCase())) &&
+	            !isStableToStablePair(s.baseAsset, s.quoteAsset) &&
+	            !looksLeverageToken(s.symbol),
+	        )
+	        .map((s) => ({
           symbol: s.symbol.toUpperCase(),
           quoteAsset: s.quoteAsset.toUpperCase(),
           baseAsset: s.baseAsset.toUpperCase(),
@@ -429,16 +478,17 @@ export const refreshBestSymbol = async () => {
     try {
       const exchangeSymbols = await fetchTradableSymbols();
       const infoBySymbol = new Map(exchangeSymbols.map((s) => [s.symbol.toUpperCase(), s]));
-      const tradable = new Set(
-        exchangeSymbols
-          .filter(
-            (s) =>
-              isVenueTradable(s) &&
-              !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
-              !looksLeverageToken(s.symbol),
-          )
-          .map((s) => s.symbol.toUpperCase()),
-      );
+	      const tradable = new Set(
+	        exchangeSymbols
+	          .filter(
+	            (s) =>
+	              isVenueTradable(s) &&
+	              !config.blacklistSymbols.includes(s.symbol.toUpperCase()) &&
+	              (config.symbolWhitelist.length === 0 || config.symbolWhitelist.includes(s.symbol.toUpperCase())) &&
+	              !looksLeverageToken(s.symbol),
+	          )
+	          .map((s) => s.symbol.toUpperCase()),
+	      );
       symbols = baseSymbols
         .map((s) => s.toUpperCase())
         .filter((s) => tradable.has(s))
@@ -457,11 +507,12 @@ export const refreshBestSymbol = async () => {
     symbols = baseSymbols;
   }
 
-  const blocked = accountBlacklistSet();
-  if (blocked.size > 0) {
-    symbols = symbols.filter((s) => !blocked.has(s.toUpperCase()));
-    discovered = discovered.filter((s) => !blocked.has(s.symbol.toUpperCase()));
-  }
+  const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
+
+  symbols = symbols.filter((s) => !isBlocked(s));
+  discovered = discovered.filter((s) => !isBlocked(s.symbol));
 
   // keep it bounded, but pick by liquidity within each quote asset when auto-discovering
   if (config.allowedSymbols.length === 0 && discovered.length > 0) {
@@ -492,7 +543,7 @@ export const refreshBestSymbol = async () => {
     }
 
     const unique = new Set<string>([...selected, config.defaultSymbol.toUpperCase(), activeSymbol]);
-    symbols = [...unique].slice(0, config.universeMaxSymbols);
+    symbols = [...unique].filter((s) => !isBlocked(s)).slice(0, config.universeMaxSymbols);
   } else {
     symbols = symbols.slice(0, config.universeMaxSymbols);
   }

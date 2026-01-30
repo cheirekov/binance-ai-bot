@@ -13,7 +13,9 @@ import { formatAgo, formatTime } from '../utils/time';
 type HomeEvent = { at: number; text: string };
 
 const PRICE_MOVE_THRESHOLD_PCT = 0.25;
-const PRICE_MOVE_BASELINE_RESET_PCT = 50;
+const PRICE_MOVE_ABSURD_PCT = 50;
+
+const isSanePrice = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0 && v < 1e12;
 
 const deriveRegime = (data: StrategyResponse | null): 'TREND' | 'RANGE' | 'NEUTRAL' | null => {
   const signals = data?.strategies?.short?.signalsUsed ?? [];
@@ -121,19 +123,22 @@ export const HomePage = (props: {
 
     const prevSymbol = (prev.symbol ?? '').toUpperCase();
     const nextSymbol = (next.symbol ?? '').toUpperCase();
-    const symbolChanged = !!prevSymbol && !!nextSymbol && prevSymbol !== nextSymbol;
+    const sameSymbol = !!prevSymbol && !!nextSymbol && prevSymbol === nextSymbol;
+    const symbolChanged = !!prevSymbol && !!nextSymbol && !sameSymbol;
 
     if (symbolChanged) {
       nextEvents.push({ at: Date.now(), text: `Active symbol changed: ${prevSymbol} → ${nextSymbol}` });
-    } else {
-      // price move (symbol-aware)
+    }
+
+    if (sameSymbol) {
+      // price move (symbol-aware + sanity checks)
       const p0 = prev.market?.price;
       const p1 = next.market?.price;
-      if (typeof p0 === 'number' && typeof p1 === 'number' && p0 > 0 && p1 > 0) {
+      if (isSanePrice(p0) && isSanePrice(p1)) {
         const pct = ((p1 - p0) / p0) * 100;
         const absPct = Math.abs(pct);
-        if (absPct > PRICE_MOVE_BASELINE_RESET_PCT) {
-          nextEvents.push({ at: Date.now(), text: `Price baseline reset (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)` });
+        if (absPct > PRICE_MOVE_ABSURD_PCT) {
+          nextEvents.push({ at: Date.now(), text: `Large price jump (> ${PRICE_MOVE_ABSURD_PCT}% in one tick) — check symbol change / data` });
         } else if (absPct >= PRICE_MOVE_THRESHOLD_PCT) {
           nextEvents.push({ at: Date.now(), text: `Price moved ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` });
         }

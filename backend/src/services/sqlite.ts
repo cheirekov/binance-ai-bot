@@ -6,6 +6,7 @@ import { get24hStats, getKlines } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
+import type { AiAutonomyProfile, AiCoachProposal, AiCoachProposalRecord, RiskGovernorState } from '../types.js';
 import { errorToLogObject } from '../utils/errors.js';
 import { getPersistedState } from './persistence.js';
 import { computeFillPnlDeltasBySymbol, computeGridPnlDeltas, computePortfolioPnlDeltas, parseWindowMs } from './pnlReconcile.js';
@@ -201,6 +202,35 @@ const initSchema = (db: SqliteDb) => {
 
     CREATE INDEX IF NOT EXISTS idx_conversion_events_at
       ON conversion_events(at);
+
+    CREATE TABLE IF NOT EXISTS ai_coach_log (
+      id INTEGER PRIMARY KEY,
+      at INTEGER NOT NULL,
+      profile TEXT,
+      governorState TEXT,
+      confidence REAL,
+      model TEXT,
+      proposalsJson TEXT,
+      appliedJson TEXT,
+      notesJson TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ai_coach_log_at
+      ON ai_coach_log(at);
+
+    CREATE TABLE IF NOT EXISTS auto_blacklist_log (
+      id INTEGER PRIMARY KEY,
+      at INTEGER NOT NULL,
+      symbol TEXT NOT NULL,
+      bannedUntil INTEGER NOT NULL,
+      ttlMinutes INTEGER NOT NULL,
+      reason TEXT,
+      source TEXT,
+      triggersJson TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_auto_blacklist_log_symbol_at
+      ON auto_blacklist_log(symbol, at);
   `);
 
   migrateTradesTable(db);
@@ -349,6 +379,58 @@ export const persistDecision = (row: {
     };
 
     stmt.run(params);
+  });
+};
+
+export const persistAiCoachLog = (row: {
+  at: number;
+  profile: AiAutonomyProfile;
+  governorState: RiskGovernorState | null | undefined;
+  confidence: number;
+  model?: string;
+  proposals: AiCoachProposal[];
+  applied: AiCoachProposalRecord[];
+  notes?: string[];
+}) => {
+  enqueueWrite((db) => {
+    db.prepare(
+      `INSERT INTO ai_coach_log (at, profile, governorState, confidence, model, proposalsJson, appliedJson, notesJson)
+       VALUES (@at, @profile, @governorState, @confidence, @model, @proposalsJson, @appliedJson, @notesJson)`,
+    ).run({
+      at: row.at,
+      profile: row.profile,
+      governorState: row.governorState ?? null,
+      confidence: row.confidence,
+      model: row.model ?? null,
+      proposalsJson: JSON.stringify(row.proposals ?? []),
+      appliedJson: JSON.stringify(row.applied ?? []),
+      notesJson: JSON.stringify(row.notes ?? []),
+    });
+  });
+};
+
+export const persistAutoBlacklistEvent = (row: {
+  at: number;
+  symbol: string;
+  bannedUntil: number;
+  ttlMinutes: number;
+  reason?: string;
+  source?: string;
+  triggers?: string[];
+}) => {
+  enqueueWrite((db) => {
+    db.prepare(
+      `INSERT INTO auto_blacklist_log (at, symbol, bannedUntil, ttlMinutes, reason, source, triggersJson)
+       VALUES (@at, @symbol, @bannedUntil, @ttlMinutes, @reason, @source, @triggersJson)`,
+    ).run({
+      at: row.at,
+      symbol: row.symbol.toUpperCase(),
+      bannedUntil: row.bannedUntil,
+      ttlMinutes: row.ttlMinutes,
+      reason: row.reason ?? null,
+      source: row.source ?? null,
+      triggersJson: JSON.stringify(row.triggers ?? []),
+    });
   });
 };
 

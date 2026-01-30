@@ -75,6 +75,7 @@ const oneOf = <T extends string>(value: string | undefined, allowed: readonly T[
 export type RuntimeConfigOverrides = Partial<{
   minQuoteVolume: number;
   maxVolatilityPercent: number;
+  riskPerTradeBasisPoints: number;
   autoTradeHorizon: 'short' | 'medium' | 'long';
   portfolioMaxAllocPct: number;
   portfolioMaxPositions: number;
@@ -86,10 +87,39 @@ const clampNumber = (value: number, min: number, max: number) => Math.min(max, M
 const runtimeBounds = {
   minQuoteVolume: { min: 100_000, max: 200_000_000 },
   maxVolatilityPercent: { min: 2, max: 60 },
+  riskPerTradeBasisPoints: { min: 1, max: 200 },
   portfolioMaxAllocPct: { min: 1, max: 95 },
   portfolioMaxPositions: { min: 1, max: 15 },
   gridMaxAllocPct: { min: 0, max: 80 },
 } as const;
+
+const parseRangeFromEnv = (
+  value: string | undefined,
+  fallback: { min: number; max: number },
+  bounds: { min: number; max: number },
+): { min: number; max: number } => {
+  const cleaned = stripInlineComment(value);
+  if (!cleaned) return fallback;
+  const trimmed = cleaned.trim();
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*\.\.\s*(\d+(?:\.\d+)?)$/);
+  if (!match) return fallback;
+  const minRaw = Number(match[1]);
+  const maxRaw = Number(match[2]);
+  if (!Number.isFinite(minRaw) || !Number.isFinite(maxRaw)) return fallback;
+  const min = clampNumber(minRaw, bounds.min, bounds.max);
+  const max = clampNumber(maxRaw, bounds.min, bounds.max);
+  if (min > max) return fallback;
+  return { min, max };
+};
+
+const aiPolicyModeFromEnv = () => oneOf(process.env.AI_POLICY_MODE, ['off', 'advisory', 'gated-live'] as const, 'off');
+
+const isAiEnabledByEnv = () => {
+  const mode = aiPolicyModeFromEnv();
+  return mode !== 'off';
+};
+
+export type AiAutonomyProfile = 'safe' | 'standard' | 'pro' | 'aggressive';
 
 export const config = {
   env: stringFromEnv(process.env.NODE_ENV, 'development'),
@@ -138,6 +168,17 @@ export const config = {
   newsCacheMinutes: numberFromEnv(process.env.NEWS_CACHE_MINUTES, 15),
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
   blacklistSymbols: listFromEnvUpper(process.env.BLACKLIST_SYMBOLS, []),
+  symbolWhitelist: listFromEnvUpper(process.env.SYMBOL_WHITELIST, []),
+  autoBlacklistEnabled: boolFromEnv(process.env.AUTO_BLACKLIST_ENABLED, true),
+  autoBlacklistTtlMinutes: Math.max(5, Math.floor(numberFromEnv(process.env.AUTO_BLACKLIST_TTL_MIN, 360))),
+  autoBlacklistTriggers: (() => {
+    const allowed = new Set(['volumeBelowFloor', 'spreadTooHigh', 'volatilitySpike', 'repeatedSlippage']);
+    const raw = listFromEnvRaw(process.env.AUTO_BLACKLIST_TRIGGERS, Array.from(allowed));
+    return raw
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .filter((t) => allowed.has(t));
+  })(),
   persistencePath: stringFromEnv(process.env.PERSISTENCE_PATH, './data/state.json'),
   persistToSqlite: boolFromEnv(process.env.PERSIST_TO_SQLITE, false),
   sqlitePath: stringFromEnv(process.env.SQLITE_PATH, '/app/data/bot.sqlite'),
@@ -197,7 +238,7 @@ export const config = {
   gridResumeTicks: Math.max(1, Math.floor(numberFromEnv(process.env.GRID_RESUME_TICKS, 3))),
   gridResumeMinutes: Math.max(0, numberFromEnv(process.env.GRID_RESUME_MINUTES, 5)),
 
-  aiPolicyMode: oneOf(process.env.AI_POLICY_MODE, ['off', 'advisory', 'gated-live'] as const, 'off'),
+  aiPolicyMode: aiPolicyModeFromEnv(),
   aiPolicyModel: optionalStringFromEnv(process.env.AI_POLICY_MODEL) || optionalStringFromEnv(process.env.OPENAI_MODEL) || 'gpt-4.1-mini',
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
@@ -210,6 +251,19 @@ export const config = {
   // AI policy: risk relaxation is opt-in (safe default false).
   // Used for actions like RESUME_GRID (treat as increasing risk unless explicitly allowed by operator).
   aiPolicyAllowRiskRelaxation: boolFromEnv(process.env.AI_POLICY_ALLOW_RISK_RELAXATION, false),
+
+  // AI autonomy & slow-loop coach (additive; safe defaults)
+  aiAutonomyProfile: oneOf(process.env.AI_AUTONOMY_PROFILE, ['safe', 'standard', 'pro', 'aggressive'] as const, 'safe') as AiAutonomyProfile,
+  aiCoachEnabled: boolFromEnv(process.env.AI_COACH_ENABLED, isAiEnabledByEnv()),
+  aiCoachIntervalSeconds: Math.max(60, Math.floor(numberFromEnv(process.env.AI_COACH_INTERVAL_SECONDS, 600))),
+  aiCoachMinEquityUsd: Math.max(0, numberFromEnv(process.env.AI_COACH_MIN_EQUITY_USD, 200)),
+  aiTuningEnvelope: {
+    minQuoteVolume: parseRangeFromEnv(process.env.MIN_QUOTE_VOLUME_RANGE, { min: 3_000_000, max: 30_000_000 }, runtimeBounds.minQuoteVolume),
+    maxVolatilityPercent: parseRangeFromEnv(process.env.MAX_VOLATILITY_RANGE, { min: 6, max: 18 }, runtimeBounds.maxVolatilityPercent),
+    riskPerTradeBasisPoints: parseRangeFromEnv(process.env.RISK_BP_RANGE, { min: 10, max: 60 }, runtimeBounds.riskPerTradeBasisPoints),
+    portfolioMaxPositions: parseRangeFromEnv(process.env.PORTFOLIO_MAX_POS_RANGE, { min: 1, max: 4 }, runtimeBounds.portfolioMaxPositions),
+    gridMaxAllocPct: parseRangeFromEnv(process.env.GRID_MAX_ALLOC_RANGE, { min: 10, max: 35 }, runtimeBounds.gridMaxAllocPct),
+  },
   apiRateLimitMax: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_MAX, 120))),
   apiRateLimitWindowSeconds: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_WINDOW_SECONDS, 10))),
   apiKey: optionalStringFromEnv(process.env.API_KEY),
@@ -243,6 +297,16 @@ export const applyRuntimeConfigOverrides = (overrides: RuntimeConfigOverrides, o
     );
     if (mutate) config.maxVolatilityPercent = bounded;
     applied.maxVolatilityPercent = bounded;
+  }
+
+  if (overrides.riskPerTradeBasisPoints !== undefined && Number.isFinite(overrides.riskPerTradeBasisPoints)) {
+    const bounded = clampNumber(
+      overrides.riskPerTradeBasisPoints,
+      runtimeBounds.riskPerTradeBasisPoints.min,
+      runtimeBounds.riskPerTradeBasisPoints.max,
+    );
+    if (mutate) config.riskPerTradeBasisPoints = bounded;
+    applied.riskPerTradeBasisPoints = bounded;
   }
 
   if (overrides.autoTradeHorizon !== undefined) {

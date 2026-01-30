@@ -13,8 +13,9 @@ import {
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
-import { Balance, PersistedPayload } from '../types.js';
+import { AiPolicyTuning, Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
+import { resolveAutonomy } from './aiAutonomy.js';
 import { runAiPolicy } from './aiPolicy.js';
 import { applyAiTuning } from './aiTuning.js';
 import { pauseGridBuys, resumeGridBuys, startOrSyncGrids } from './gridTrader.js';
@@ -30,6 +31,7 @@ import {
 } from './sqlite.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 import { sweepUnusedToHome } from './sweepUnused.js';
+import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const persisted = getPersistedState();
 
@@ -106,50 +108,59 @@ const todayKey = () => new Date().toISOString().slice(0, 10);
 
 const getRiskGovernorDecision = () => persisted.meta?.riskGovernor?.decision ?? null;
 
-const isRiskTighteningTune = (tune: Record<string, unknown> | undefined | null) => {
-  if (!tune) return true;
-  const gov = getRiskGovernorDecision();
-  if (!gov || gov.state === 'NORMAL') return true;
+const pickAiTuningForAutoApply = (tune: AiPolicyTuning | null | undefined): AiPolicyTuning => ({
+  minQuoteVolume: tune?.minQuoteVolume,
+  maxVolatilityPercent: tune?.maxVolatilityPercent,
+  riskPerTradeBasisPoints: tune?.riskPerTradeBasisPoints,
+  portfolioMaxPositions: tune?.portfolioMaxPositions,
+  gridMaxAllocPct: tune?.gridMaxAllocPct,
+});
 
-  // Under CAUTION/HALT: allow only risk tightening (never relaxation).
-  // Tightening rules:
-  // - minQuoteVolume: can increase only
-  // - maxVolatilityPercent: can decrease only
-  // - portfolioMaxAllocPct / gridMaxAllocPct: can decrease only
-  // - portfolioMaxPositions: can decrease only
-  // - autoTradeHorizon: do not change (neutral but can change behavior)
-  const asNum = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : Number.NaN);
+const splitTuningByRiskDirection = (tune: AiPolicyTuning) => {
+  const current = {
+    minQuoteVolume: config.minQuoteVolume,
+    maxVolatilityPercent: config.maxVolatilityPercent,
+    riskPerTradeBasisPoints: config.riskPerTradeBasisPoints,
+    portfolioMaxPositions: config.portfolioMaxPositions,
+    gridMaxAllocPct: config.gridMaxAllocPct,
+  };
 
-  if ('autoTradeHorizon' in tune) return false;
+  const tighten: AiPolicyTuning = {};
+  const relax: AiPolicyTuning = {};
 
-  if ('minQuoteVolume' in tune) {
-    const next = asNum((tune as Record<string, unknown>).minQuoteVolume);
-    if (Number.isFinite(next) && next < config.minQuoteVolume) return false;
+  if (tune.minQuoteVolume !== undefined && Number.isFinite(tune.minQuoteVolume) && tune.minQuoteVolume !== current.minQuoteVolume) {
+    if (tune.minQuoteVolume >= current.minQuoteVolume) tighten.minQuoteVolume = tune.minQuoteVolume;
+    else relax.minQuoteVolume = tune.minQuoteVolume;
   }
-  if ('maxVolatilityPercent' in tune) {
-    const next = asNum((tune as Record<string, unknown>).maxVolatilityPercent);
-    if (Number.isFinite(next) && next > config.maxVolatilityPercent) return false;
+  if (tune.maxVolatilityPercent !== undefined && Number.isFinite(tune.maxVolatilityPercent) && tune.maxVolatilityPercent !== current.maxVolatilityPercent) {
+    if (tune.maxVolatilityPercent <= current.maxVolatilityPercent) tighten.maxVolatilityPercent = tune.maxVolatilityPercent;
+    else relax.maxVolatilityPercent = tune.maxVolatilityPercent;
   }
-  if ('portfolioMaxAllocPct' in tune) {
-    const next = asNum((tune as Record<string, unknown>).portfolioMaxAllocPct);
-    if (Number.isFinite(next) && next > config.portfolioMaxAllocPct) return false;
+  if (
+    tune.riskPerTradeBasisPoints !== undefined &&
+    Number.isFinite(tune.riskPerTradeBasisPoints) &&
+    tune.riskPerTradeBasisPoints !== current.riskPerTradeBasisPoints
+  ) {
+    if (tune.riskPerTradeBasisPoints <= current.riskPerTradeBasisPoints) tighten.riskPerTradeBasisPoints = tune.riskPerTradeBasisPoints;
+    else relax.riskPerTradeBasisPoints = tune.riskPerTradeBasisPoints;
   }
-  if ('portfolioMaxPositions' in tune) {
-    const next = asNum((tune as Record<string, unknown>).portfolioMaxPositions);
-    if (Number.isFinite(next) && next > config.portfolioMaxPositions) return false;
+  if (
+    tune.portfolioMaxPositions !== undefined &&
+    Number.isFinite(tune.portfolioMaxPositions) &&
+    tune.portfolioMaxPositions !== current.portfolioMaxPositions
+  ) {
+    if (tune.portfolioMaxPositions <= current.portfolioMaxPositions) tighten.portfolioMaxPositions = tune.portfolioMaxPositions;
+    else relax.portfolioMaxPositions = tune.portfolioMaxPositions;
   }
-  if ('gridMaxAllocPct' in tune) {
-    const next = asNum((tune as Record<string, unknown>).gridMaxAllocPct);
-    if (Number.isFinite(next) && next > config.gridMaxAllocPct) return false;
+  if (tune.gridMaxAllocPct !== undefined && Number.isFinite(tune.gridMaxAllocPct) && tune.gridMaxAllocPct !== current.gridMaxAllocPct) {
+    if (tune.gridMaxAllocPct <= current.gridMaxAllocPct) tighten.gridMaxAllocPct = tune.gridMaxAllocPct;
+    else relax.gridMaxAllocPct = tune.gridMaxAllocPct;
   }
 
-  return true;
+  return { tighten, relax };
 };
 
 const positionVenue = (pos: Position | null | undefined): 'spot' | 'futures' => (pos?.venue ?? 'spot');
-
-const accountBlacklistSet = () =>
-  new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
 
 const blacklistAccountSymbol = (symbol: string, reason: string) => {
   const upper = symbol.toUpperCase();
@@ -1371,7 +1382,9 @@ const portfolioTick = async (
     }
   }
   const maxAllocHome = (allocBaseHome * config.portfolioMaxAllocPct) / 100;
-  const blockedSymbols = accountBlacklistSet();
+  pruneExpiredAutoBlacklist(now);
+  const isBlockedByPolicy = (s: string) => getSymbolBlockInfo(s, now).blocked;
+  const blockedSymbols = new Set<string>(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
   if (config.gridEnabled) {
     for (const grid of Object.values(persisted.grids ?? {})) {
       if (grid?.status === 'running') blockedSymbols.add(grid.symbol.toUpperCase());
@@ -1482,9 +1495,9 @@ const portfolioTick = async (
 
   const ranked = persisted.meta?.rankedCandidates?.map((c) => c.symbol.toUpperCase()) ?? [];
   const universe = forceEntry
-    ? [forceEntry.symbol.toUpperCase()].filter((s) => !blockedSymbols.has(s.toUpperCase()))
+    ? [forceEntry.symbol.toUpperCase()].filter((s) => !blockedSymbols.has(s.toUpperCase()) && !isBlockedByPolicy(s))
     : Array.from(new Set([state.symbol.toUpperCase(), ...ranked]))
-        .filter((s) => !blockedSymbols.has(s.toUpperCase()))
+        .filter((s) => !blockedSymbols.has(s.toUpperCase()) && !isBlockedByPolicy(s))
         .slice(0, 20);
 
   for (const candidate of universe) {
@@ -2060,6 +2073,15 @@ export const autoTradeTick = async (symbol?: string) => {
 
   const governor = getRiskGovernorDecision();
   const entriesAllowedByGovernor = !(governor?.entriesPaused ?? false);
+  const autonomy = resolveAutonomy(
+    config.aiAutonomyProfile,
+    {
+      aiPolicyAllowRiskRelaxation: config.aiPolicyAllowRiskRelaxation,
+      aiPolicySweepAutoApply: config.aiPolicySweepAutoApply,
+      autoBlacklistEnabled: config.autoBlacklistEnabled,
+    },
+    governor?.state ?? null,
+  );
 
   if (config.aiPolicyMode === 'advisory') {
     const aiDecisionRaw = await runAiPolicy(symbol);
@@ -2114,30 +2136,49 @@ export const autoTradeTick = async (symbol?: string) => {
   }
 
   try {
-    if (config.aiPolicyMode === 'gated-live' && aiDecision) {
-      if (
-        config.aiPolicyTuningAutoApply &&
-        aiDecision.tune &&
-        Object.keys(aiDecision.tune).length > 0 &&
-        isRiskTighteningTune(aiDecision.tune as unknown as Record<string, unknown>)
-      ) {
-        const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
-        if (alreadyAppliedAt < aiDecision.at) {
-          const res = applyAiTuning({ tune: { ...aiDecision.tune }, source: 'ai', reason: `ai-policy:${aiDecision.action}` });
-          if (res.ok) {
-            if (res.applied && Object.keys(res.applied).length > 0) {
-              logger.info({ applied: res.applied, notes: res.notes }, 'AI policy applied runtime tuning');
-            }
-          } else {
-            logger.warn({ error: res.error }, 'AI policy tuning apply failed');
-          }
-        }
-      }
+	    if (config.aiPolicyMode === 'gated-live' && aiDecision) {
+	      if (
+	        config.aiPolicyTuningAutoApply &&
+	        aiDecision.tune &&
+	        Object.keys(aiDecision.tune).length > 0
+	      ) {
+	        const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
+	        if (alreadyAppliedAt < aiDecision.at) {
+	          const picked = pickAiTuningForAutoApply(aiDecision.tune);
+	          const { tighten, relax } = splitTuningByRiskDirection(picked);
+	          const appliedAny: Record<string, unknown> = {};
+	          const notes: string[] = [];
 
-      if (config.aiPolicySweepAutoApply && aiDecision.sweepUnusedToHome && config.tradeVenue === 'spot') {
-        const now = Date.now();
-        const cooldownMs = Math.max(0, config.aiPolicySweepCooldownMinutes) * 60_000;
-        const lastSweepAt = persisted.meta?.aiSweeps?.lastAt ?? 0;
+	          if (autonomy.canAutoApplyTuningTighten && Object.keys(tighten).length > 0) {
+	            const res = applyAiTuning({ tune: { ...tighten }, source: 'ai', reason: `ai-policy:tighten:${aiDecision.action}` });
+	            if (res.ok) {
+	              if (res.applied && Object.keys(res.applied).length > 0) appliedAny.tighten = res.applied;
+	              if (res.notes?.length) notes.push(...res.notes);
+	            } else {
+	              logger.warn({ error: res.error }, 'AI policy tighten tuning apply failed');
+	            }
+	          }
+
+	          if (autonomy.canAutoApplyTuningRelax && Object.keys(relax).length > 0) {
+	            const res = applyAiTuning({ tune: { ...relax }, source: 'ai', reason: `ai-policy:relax:${aiDecision.action}` });
+	            if (res.ok) {
+	              if (res.applied && Object.keys(res.applied).length > 0) appliedAny.relax = res.applied;
+	              if (res.notes?.length) notes.push(...res.notes);
+	            } else {
+	              logger.warn({ error: res.error }, 'AI policy relax tuning apply failed');
+	            }
+	          }
+
+	          if (Object.keys(appliedAny).length > 0) {
+	            logger.info({ applied: appliedAny, notes: notes.length ? notes : undefined }, 'AI policy applied runtime tuning');
+	          }
+	        }
+	      }
+
+	      if (config.aiPolicySweepAutoApply && autonomy.canAutoSweepToHome && aiDecision.sweepUnusedToHome && config.tradeVenue === 'spot') {
+	        const now = Date.now();
+	        const cooldownMs = Math.max(0, config.aiPolicySweepCooldownMinutes) * 60_000;
+	        const lastSweepAt = persisted.meta?.aiSweeps?.lastAt ?? 0;
         if (!lastSweepAt || now - lastSweepAt >= cooldownMs) {
           const res = await sweepUnusedToHome({
             dryRun: false,
@@ -2166,18 +2207,23 @@ export const autoTradeTick = async (symbol?: string) => {
         return;
       }
 
-      if (aiDecision.action === 'PAUSE_GRID') {
-        const target = aiDecision.symbol?.toUpperCase();
-        if (!target) {
-          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: missing symbol' });
-          await updateEquityTelemetry();
-          return;
-        }
-
-        if (!config.gridEnabled) {
-          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: GRID_ENABLED=false' });
-          await updateEquityTelemetry();
-          return;
+	      if (aiDecision.action === 'PAUSE_GRID') {
+	        const target = aiDecision.symbol?.toUpperCase();
+	        if (!target) {
+	          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: missing symbol' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+	        if (!autonomy.canPauseGrid) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy PAUSE_GRID blocked by autonomy profile' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+	
+	        if (!config.gridEnabled) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: GRID_ENABLED=false' });
+	          await updateEquityTelemetry();
+	          return;
         }
 
         const res = await pauseGridBuys(target, { reason: 'ai' });
@@ -2191,30 +2237,25 @@ export const autoTradeTick = async (symbol?: string) => {
         return;
       }
 
-      if (aiDecision.action === 'RESUME_GRID') {
-        const target = aiDecision.symbol?.toUpperCase();
-        if (!target) {
-          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy RESUME_GRID ignored: missing symbol' });
-          await updateEquityTelemetry();
-          return;
-        }
+	      if (aiDecision.action === 'RESUME_GRID') {
+	        const target = aiDecision.symbol?.toUpperCase();
+	        if (!target) {
+	          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy RESUME_GRID ignored: missing symbol' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
 
-        // Conservative default: treat RESUME as a risk relaxation. Require explicit operator approval + governor NORMAL.
-        if (!config.aiPolicyAllowRiskRelaxation) {
-          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID ignored: AI_POLICY_ALLOW_RISK_RELAXATION=false' });
-          await updateEquityTelemetry();
-          return;
-        }
-        if (governor && governor.state !== 'NORMAL') {
-          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: `AI policy RESUME_GRID ignored: governor=${governor.state}` });
-          await updateEquityTelemetry();
-          return;
-        }
-        if (!config.gridEnabled) {
-          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID ignored: GRID_ENABLED=false' });
-          await updateEquityTelemetry();
-          return;
-        }
+	        // Conservative default: treat RESUME as a risk relaxation. Require autonomy permission (profile + explicit env allow + governor NORMAL).
+	        if (!autonomy.canResumeGrid) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID blocked by autonomy profile / governor / env allow' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+	        if (!config.gridEnabled) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID ignored: GRID_ENABLED=false' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
 
         const res = await resumeGridBuys(target);
         recordDecision({

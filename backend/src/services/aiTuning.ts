@@ -46,6 +46,36 @@ const clampGridAllocIncrease = (
   };
 };
 
+const clampToEnvelopeAiOnly = (tune: AiPolicyTuning, notes: string[]) => {
+  const env = config.aiTuningEnvelope;
+  const next: AiPolicyTuning = { ...tune };
+
+  type NumericKey = 'minQuoteVolume' | 'maxVolatilityPercent' | 'riskPerTradeBasisPoints' | 'portfolioMaxPositions' | 'gridMaxAllocPct';
+
+  const clamp = (key: NumericKey, min: number, max: number, map?: (v: number) => number) => {
+    const raw = next[key];
+    if (raw === undefined) return;
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+      delete next[key];
+      return;
+    }
+    const val = typeof map === 'function' ? map(raw) : raw;
+    const bounded = Math.min(max, Math.max(min, val));
+    if (bounded !== raw) {
+      notes.push(`AI tuning envelope clamp: ${String(key)} ${raw} → ${bounded}`);
+    }
+    (next as Record<string, unknown>)[key] = bounded;
+  };
+
+  clamp('minQuoteVolume', env.minQuoteVolume.min, env.minQuoteVolume.max, Math.floor);
+  clamp('maxVolatilityPercent', env.maxVolatilityPercent.min, env.maxVolatilityPercent.max);
+  clamp('riskPerTradeBasisPoints', env.riskPerTradeBasisPoints.min, env.riskPerTradeBasisPoints.max);
+  clamp('portfolioMaxPositions', env.portfolioMaxPositions.min, env.portfolioMaxPositions.max, (v) => Math.floor(v));
+  clamp('gridMaxAllocPct', env.gridMaxAllocPct.min, env.gridMaxAllocPct.max);
+
+  return next;
+};
+
 export type ApplyAiTuningResult =
   | {
       ok: true;
@@ -77,7 +107,12 @@ export const applyAiTuning = (params: {
   }
 
   const notes: string[] = [];
-  const final = { ...bounded };
+  let final: AiPolicyTuning = { ...bounded };
+
+  // AI-only: clamp to the operator-defined tuning envelope (adds an extra safety boundary over absolute runtime bounds).
+  if (params.source === 'ai') {
+    final = clampToEnvelopeAiOnly(final, notes);
+  }
 
   // Clamp daily increases for GRID_MAX_ALLOC_PCT (AI only).
   if (final.gridMaxAllocPct !== undefined) {

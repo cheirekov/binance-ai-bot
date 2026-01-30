@@ -23,6 +23,18 @@ export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
 export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC' | 'PAUSE_GRID' | 'RESUME_GRID' | 'REDUCE_RISK';
 
+export type AiAutonomyProfile = 'safe' | 'standard' | 'pro' | 'aggressive';
+
+export interface AiAutonomyCapabilities {
+  canAutoApplyTuningTighten: boolean;
+  canAutoApplyTuningRelax: boolean;
+  canAutoSweepToHome: boolean;
+  canPauseGrid: boolean;
+  canResumeGrid: boolean;
+  canAutoBlacklistSymbols: boolean;
+  canEnableUnwindPlans: boolean;
+}
+
 export type RiskGovernorState = 'NORMAL' | 'CAUTION' | 'HALT';
 
 export type RiskGovernorReasonCode = 'drawdown_daily' | 'drawdown_rolling' | 'trend' | 'fee_burn' | 'vol_spike' | 'manual';
@@ -38,6 +50,7 @@ export interface RiskGovernorDecision {
 export interface AiPolicyTuning {
   minQuoteVolume?: number;
   maxVolatilityPercent?: number;
+  riskPerTradeBasisPoints?: number;
   autoTradeHorizon?: Horizon;
   portfolioMaxAllocPct?: number;
   portfolioMaxPositions?: number;
@@ -56,6 +69,33 @@ export interface AiPolicyDecision {
   model?: string;
   tune?: AiPolicyTuning;
   sweepUnusedToHome?: boolean;
+}
+
+export type AiCoachProposal =
+  | { type: 'TUNING_UPDATE'; changes: AiPolicyTuning; reason: string }
+  | {
+      type: 'SYMBOL_POLICY';
+      whitelistAdd?: string[];
+      blacklistAdd?: Array<{ symbol: string; ttlMinutes: number; reason: string }>;
+      reason?: string;
+    }
+  | { type: 'GRID_ACTION'; symbol: string; action: 'PAUSE_BUYS' | 'RESUME_BUYS' | 'STOP_GRID' | 'START_GRID'; reason: string };
+
+export interface AiCoachProposalRecord {
+  proposal: AiCoachProposal;
+  applied: { applied: boolean; ok?: boolean; error?: string; result?: unknown };
+}
+
+export interface AiCoachSnapshot {
+  at: number;
+  profile: AiAutonomyProfile;
+  governorState?: RiskGovernorState | null;
+  confidence: number;
+  notes?: string[];
+  model?: string;
+  proposals: AiCoachProposalRecord[];
+  skipped?: boolean;
+  skipReason?: string;
 }
 
 export interface AiPolicyMeta {
@@ -192,6 +232,22 @@ export interface StrategyResponse {
     reason?: string;
     values: AiPolicyTuning;
   };
+  symbolPolicy?: {
+    whitelist: string[];
+    envBlacklist: string[];
+    accountBlacklist: Array<{ symbol: string; at: number; reason: string }>;
+    autoBlacklist: Array<{
+      symbol: string;
+      at: number;
+      bannedUntil: number;
+      ttlMinutes: number;
+      reason: string;
+      source?: string;
+      triggers?: string[];
+    }>;
+  };
+  aiAutonomy?: { profile: AiAutonomyProfile; capabilities: AiAutonomyCapabilities };
+  aiCoach?: { enabled: boolean; intervalSeconds: number; minEquityUsd: number; latest: AiCoachSnapshot | null };
   positions?: Record<
     string,
     {

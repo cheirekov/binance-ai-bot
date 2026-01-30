@@ -8,6 +8,7 @@ import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getPersistedState, persistGrid, persistMeta } from './persistence.js';
 import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
 import { persistGridFill, persistTradeFill } from './sqlite.js';
+import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const persisted = getPersistedState();
 
@@ -311,16 +312,17 @@ export const refreshGridCandidates = async () => {
   if (!config.gridEnabled) return { best: null as string | null, candidates: [] as { symbol: string; score: number }[] };
 
   const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
+
   const last = persisted.meta?.gridUpdatedAt ?? 0;
   if (now - last < Math.max(30_000, config.gridRebalanceSeconds * 1000)) {
-    const cached = persisted.meta?.rankedGridCandidates ?? [];
+    const cached = (persisted.meta?.rankedGridCandidates ?? []).filter((c) => !isBlocked(c.symbol));
     return { best: cached[0]?.symbol ?? null, candidates: cached };
   }
 
   const symbols = await fetchTradableSymbols();
   const home = config.homeAsset.toUpperCase();
-  const blocked = new Set(config.blacklistSymbols.map((s) => s.toUpperCase()));
-  for (const key of Object.keys(persisted.meta?.accountBlacklist ?? {})) blocked.add(key.toUpperCase());
 
   const universe =
     config.gridSymbols.length > 0
@@ -329,7 +331,7 @@ export const refreshGridCandidates = async () => {
 
   const coarse: { symbol: string; snap: Awaited<ReturnType<typeof get24hStats>> }[] = [];
   for (const sym of universe) {
-    if (blocked.has(sym)) continue;
+    if (isBlocked(sym)) continue;
     const info = findSymbolInfo(symbols, sym);
     if (!info || !isSpotTradable(info)) continue;
     if (info.quoteAsset.toUpperCase() !== home) continue;
@@ -1038,6 +1040,8 @@ export const startOrSyncGrids = async () => {
   const allowNewGrids = governor?.state === undefined || governor?.state === 'NORMAL';
 
   const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
   const last = persisted.meta?.gridRebalanceAt ?? 0;
   if (now - last < config.gridRebalanceSeconds * 1000) return;
 
@@ -1074,7 +1078,7 @@ export const startOrSyncGrids = async () => {
 
   // Ensure we have at most GRID_MAX_ACTIVE_GRIDS running grids.
   const runningSymbols = new Set(existing.map((g) => g.symbol.toUpperCase()));
-  const toStart = allowNewGrids ? desiredSymbols.filter((s) => !runningSymbols.has(s) && !stoppedSymbols.has(s)) : [];
+  const toStart = allowNewGrids ? desiredSymbols.filter((s) => !runningSymbols.has(s) && !stoppedSymbols.has(s) && !isBlocked(s)) : [];
 
   const allocated = existing.reduce((sum, g) => sum + (g.allocationHome ?? 0), 0);
   const remaining = Math.max(0, maxAllocHome - allocated);
@@ -1135,6 +1139,11 @@ export const startGrid = async (symbolInput: string) => {
   if (!config.gridEnabled) return { ok: false, error: 'GRID_ENABLED=false (enable grid mode in .env)' };
 
   const symbol = symbolInput.toUpperCase();
+  pruneExpiredAutoBlacklist(Date.now());
+  const block = getSymbolBlockInfo(symbol);
+  if (block.blocked) {
+    return { ok: false, error: `Symbol ${symbol} blocked: ${block.reason}` };
+  }
   const existing = persisted.grids?.[symbol];
   if (existing?.status === 'running') return { ok: true };
 
