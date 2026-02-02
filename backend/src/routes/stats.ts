@@ -44,13 +44,23 @@ export async function statsRoutes(fastify: FastifyInstance) {
     };
   });
 
+  fastify.get('/stats/quote_pools', async () => {
+    const persisted = getPersistedState();
+    return persisted.meta?.quotePools ?? { enabled: false };
+  });
+
   fastify.get('/stats/universe_debug', async () => {
     const persisted = getPersistedState();
+    const ranked = persisted.meta?.rankedCandidates ?? [];
     return {
       at: persisted.meta?.universeDebug?.at ?? null,
-      allowedQuoteAssetsResolved: persisted.meta?.universeDebug?.allowedQuoteAssetsResolved ?? (persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets),
+      allowedQuoteAssetsResolved:
+        persisted.meta?.universeDebug?.allowedQuoteAssetsResolved ??
+        (persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets),
       counts: persisted.meta?.universeDebug?.counts ?? null,
       top: persisted.meta?.universeDebug?.top ?? [],
+      rankedCandidatesCount: ranked.length,
+      rankedCandidates: ranked.slice(0, 250),
     };
   });
 }

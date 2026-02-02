@@ -40,7 +40,8 @@ const deriveDecision = (data: StrategyResponse | null): { decision: 'HOLD' | 'BU
 };
 
 const decisionReasons = (data: StrategyResponse | null): string[] => {
-  const aiReason = data?.aiPolicy?.lastDecision?.reason?.trim();
+  const ai = data?.aiPolicy?.lastDecision;
+  const aiReason = ai?.reason?.trim();
   if (aiReason) {
     const parts = aiReason
       .split(/\n|•|;/g)
@@ -48,6 +49,15 @@ const decisionReasons = (data: StrategyResponse | null): string[] => {
       .filter(Boolean);
     return parts.slice(0, 5);
   }
+
+  // If AI is enabled but a decision is missing/empty (rate-limited or skipped), surface a clear note.
+  const aiMode = data?.aiMode ?? data?.aiPolicyMode;
+  if (aiMode && aiMode !== 'off') {
+    const gov = data?.riskGovernor?.state;
+    if (gov === 'HALT') return ['AI skipped: blocked by Risk Governor HALT'];
+    if (data?.emergencyStop) return ['AI skipped: emergency stop enabled'];
+  }
+
   const plan = data?.strategies?.short;
   const signals = plan?.signalsUsed ?? [];
   const pick = (prefix: string) => signals.find((s) => s.toUpperCase().startsWith(prefix.toUpperCase()));

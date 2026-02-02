@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { Horizon, MarketSnapshot, RiskSettings } from '../types.js';
-
 import { callJson } from './jsonCall.js';
 
 const cacheTtlMs = 30 * 60 * 1000;

@@ -227,6 +227,25 @@ export interface StrategyResponse {
     reason?: string;
     orderId?: string | number;
   };
+
+  unwind?: {
+    enabled: boolean;
+    queuedAssets: string[];
+    at?: number;
+    lastPlacedAt?: number;
+    lastOrdersPlaced?: number;
+  };
+
+  quotePools?: {
+    enabled: boolean;
+    homeAsset: string;
+    equityHome?: number;
+    targets: Array<{ asset: string; targetPct: number }>;
+    topUpsAttempted: number;
+    topUpsOk: number;
+    skipped: Record<string, string>;
+    at: number;
+  };
   // Canonical: aiMode. Keep aiPolicyMode optional for backward-compatible UI parsing.
   aiMode?: AiMode;
   aiPolicyMode?: AiPolicyMode;

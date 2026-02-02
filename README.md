@@ -6,7 +6,7 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Fastify API with Binance Spot client, OpenAI strategy reinforcement, and simple scheduler to keep strategies fresh.
 - Regime-based indicator engine (EMA/RSI/ATR/ADX/Bollinger) with deterministic entry/exit levels and risk sizing.
 - React + Vite dashboard for live market stats, AI notes, balances, and quick simulated trades.
-- Universe scanner that continuously ranks opportunities across the exchange and reports candidates (supports `QUOTE_ASSETS=AUTO` for multi-quote discovery without USDT assumptions).
+- Universe scanner that continuously ranks opportunities across the exchange and reports candidates (supports `QUOTE_ASSETS=AUTO` for multi-quote discovery across the full exchange universe, with operator-controlled exclusions).
 - Optional portfolio mode: multiple concurrent long positions, conversion to required quote assets, and “risk-off” return to `HOME_ASSET`.
 - Optional spot grid mode: auto-discovers range-bound candidates (heuristics) and maintains a limit-order grid (spot-only).
 - Risk Governor (account-level): state machine `NORMAL/CAUTION/HALT` driven by mark-to-market equity drawdown, fee burn, and data/liquidity failures (computed from live balances + tickers + `state.json`, not SQLite). Trend is **per-symbol only** (Grid Guard + candidate scoring) and must not globally pause trading.
@@ -20,7 +20,9 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Dockerfiles + `docker-compose` for Linux deployment; GitHub Actions CI for lint/test/build.
 ## Quick start (spot, Docker)
 
-See: **[docs/QUICKSTART_SPOT.md](./docs/QUICKSTART_SPOT.md)**
+See:
+- **[docs/QUICKSTART_SPOT.md](./docs/QUICKSTART_SPOT.md)**
+- **[docs/CONFIG.md](./docs/CONFIG.md)** (all env vars in one place)
 
 Basic setup:
 
@@ -28,12 +30,16 @@ Basic setup:
 cp .env.spot.basic.example .env
 docker-compose up --build
 ```
-   - Universe discovery is controlled by `QUOTE_ASSETS` (set `QUOTE_ASSETS=AUTO` for EU-friendly discovery across multiple quote assets without defaulting to USDT). Use `EXCLUDED_QUOTE_ASSETS` (default `USDT`) to hard-exclude quotes from discovery.
+   - Universe discovery is controlled by `QUOTE_ASSETS` (set `QUOTE_ASSETS=AUTO` to scan across multiple quote assets).
+     - No hardcoded quote bans: use `EXCLUDED_ASSETS` to exclude assets (example EU: `EXCLUDED_ASSETS=USDT`).
+     - Back-compat: `EXCLUDED_QUOTE_ASSETS` is supported but defaults to empty.
    - For full discovery, leave `TRADE_UNIVERSE=` empty. If you set `TRADE_UNIVERSE`, the bot will only open new trades within that list.
    - Auto-trading requires both `AUTO_TRADE_ENABLED=true` and `TRADING_ENABLED=true`.
    - Futures (advanced, higher risk): set `TRADE_VENUE=futures`, provide a key with futures permissions, and set `FUTURES_ENABLED=true`. Start with low leverage (e.g. `FUTURES_LEVERAGE=2`) and test on futures testnet first.
    - Portfolio mode (optional): set `PORTFOLIO_ENABLED=true`, choose `HOME_ASSET` (e.g. `USDC`), and optionally `CONVERSION_ENABLED=true` if you allow auto-converting into BTC/XRP quotes.
-   - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only** and only run on symbols quoted in `HOME_ASSET` (e.g. `BTCUSDC` if `HOME_ASSET=USDC`). Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC`.
+   - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only**.
+     - Grids can run on non-home quotes (example: `BNBETH` with `HOME_ASSET=USDC`) if `CONVERSION_ENABLED=true` so the bot can fund the required quote asset.
+     - Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC,BNBETH`.
    - AI policy (optional): set `AI_MODE=advisory` (no auto execution) or `AI_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
      - Token hygiene: `AI_POLICY_CALL_WHEN_BLOCKED=never|hourly|always` controls whether the bot calls the model when trading is blocked (HALT/emergency stop/daily loss cap). Default is `never`.
      - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.

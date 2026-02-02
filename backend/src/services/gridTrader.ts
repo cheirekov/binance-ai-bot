@@ -5,7 +5,9 @@ import { logger } from '../logger.js';
 import { fetchIndicatorSnapshot } from '../strategy/indicators.js';
 import { Balance, GridOrder, GridState } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
+import { ensureAssetBalance } from './conversionRouter.js';
 import { getPersistedState, persistGrid, persistMeta } from './persistence.js';
+import { getRate } from './rates.js';
 import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
 import { persistGridFill, persistTradeFill } from './sqlite.js';
 import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
@@ -194,17 +196,24 @@ const extractGridFillRow = (symbol: string, order: unknown, now: number) => {
   };
 };
 
-const revaluePerformance = (perf: NonNullable<GridState['performance']>, now: number, price: number) => {
-  const baseValue = clampNonNegative(perf.baseVirtual) * Math.max(price, 0);
-  const gross = baseValue + clampNonNegative(perf.quoteVirtual);
-  const net = Math.max(0, gross - clampNonNegative(perf.feesHome));
+const revaluePerformance = (
+  perf: NonNullable<GridState['performance']>,
+  now: number,
+  price: number,
+  quoteToHome: number,
+) => {
+  const q2h = clampNonNegative(quoteToHome);
+  const baseValueHome = clampNonNegative(perf.baseVirtual) * Math.max(price, 0) * (q2h || 0);
+  const quoteValueHome = clampNonNegative(perf.quoteVirtual) * (q2h || 0);
+  const grossHome = baseValueHome + quoteValueHome;
+  const netHome = Math.max(0, grossHome - clampNonNegative(perf.feesHome));
   const start = Math.max(0, perf.startValueHome);
-  const pnl = net - start;
+  const pnl = netHome - start;
   const pnlPct = start > 0 ? (pnl / start) * 100 : 0;
   return {
     ...perf,
     lastAt: now,
-    lastValueHome: net,
+    lastValueHome: netHome,
     pnlHome: pnl,
     pnlPct,
   };
@@ -322,7 +331,6 @@ export const refreshGridCandidates = async () => {
   }
 
   const symbols = await fetchTradableSymbols();
-  const home = config.homeAsset.toUpperCase();
 
   const universe =
     config.gridSymbols.length > 0
@@ -334,7 +342,7 @@ export const refreshGridCandidates = async () => {
     if (isBlocked(sym)) continue;
     const info = findSymbolInfo(symbols, sym);
     if (!info || !isSpotTradable(info)) continue;
-    if (info.quoteAsset.toUpperCase() !== home) continue;
+    // Allow non-home quote grids; funding handled at order-placement time via conversionRouter.
     if (isStableLikeAsset(info.baseAsset) && isStableLikeAsset(info.quoteAsset)) continue;
     if (looksLeverageToken(sym)) continue;
     try {
@@ -377,9 +385,6 @@ const buildGridState = async (symbol: string, balances: Balance[], symbols: Symb
   if (!info) throw new Error(`Unknown symbol ${symbol}`);
   if (!isSpotTradable(info)) throw new Error(`Symbol ${symbol} not tradable on spot`);
   const home = config.homeAsset.toUpperCase();
-  if (info.quoteAsset.toUpperCase() !== home) {
-    throw new Error(`Grid requires quoteAsset=${home}. ${symbol} quote is ${info.quoteAsset}`);
-  }
   if (isStableLikeAsset(info.baseAsset) && isStableLikeAsset(info.quoteAsset)) {
     throw new Error('Grid disabled for stable-to-stable pairs');
   }
@@ -575,6 +580,9 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   const current = snap.price;
   if (!Number.isFinite(current) || current <= 0) throw new Error('Invalid market price');
 
+  // For quote!=home grids, performance must be marked-to-market in HOME via multi-hop rate.
+  const quoteToHome = grid.quoteAsset.toUpperCase() === grid.homeAsset.toUpperCase() ? 1 : (await getRate(grid.quoteAsset, grid.homeAsset)) ?? 0;
+
   const perf0 = ensurePerformance(grid, now);
 
   const bufferPct = Math.max(0, config.gridBreakoutBufferPct) / 100;
@@ -591,6 +599,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
         { ...(perfAfterLiquidation ?? perf0), breakouts },
         now,
         current,
+        quoteToHome,
       );
       const stopped: GridState = {
         ...grid,
@@ -902,8 +911,26 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
 
     if (side === 'BUY') {
       const required = qty * levelPrice;
-      if (required <= 0 || freeQuote < required) continue;
+      if (required <= 0) continue;
       if (gridAvailableQuote < required) continue;
+
+      if (freeQuote < required) {
+        // Fund quote if needed and allowed (spot only). Never runs during Governor HALT/emergency stop (router blocks).
+        const fund = await ensureAssetBalance(quote, required, config.homeAsset);
+        if (!fund.ok) continue;
+
+        // Refresh balances after conversion to avoid stale freeQuote.
+        try {
+          balances = await getBalances();
+        } catch {
+          // keep existing
+        }
+        const refreshedFree = balanceFreeMap(balances);
+        freeQuote = refreshedFree.get(quote) ?? freeQuote;
+      }
+
+      if (freeQuote < required) continue;
+
       try {
         const order = await placeOrder({ symbol: grid.symbol, side, quantity: qty, price: levelPrice, type: 'LIMIT' });
         const orderId = Number((order as { orderId?: string | number } | undefined)?.orderId ?? 0);
@@ -934,7 +961,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     }
   }
 
-  perf = revaluePerformance(perf, now, current);
+  perf = revaluePerformance(perf, now, current, quoteToHome);
   const updated: GridState = {
     ...grid,
     status: 'running',

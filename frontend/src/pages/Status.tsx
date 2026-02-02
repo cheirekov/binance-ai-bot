@@ -102,6 +102,8 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
   const coachLatest = props.data?.aiCoach?.latest ?? null;
   const coachEnabled = props.data?.aiCoach?.enabled ?? false;
   const universe = props.data?.universe ?? null;
+  const unwind = props.data?.unwind ?? null;
+  const quotePools = props.data?.quotePools ?? null;
   const aiMode = props.data?.aiMode ?? props.data?.aiPolicyMode ?? 'off';
 
   const expectedTyped = useMemo(() => {
@@ -223,6 +225,35 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
               Convert: {props.data?.conversionEnabled ? 'On' : 'Off'}
             </Chip>
             <Chip
+              tone={
+                unwind?.enabled
+                  ? unwind.queuedAssets?.length
+                    ? 'warn'
+                    : 'good'
+                  : 'neutral'
+              }
+              title={
+                unwind?.enabled
+                  ? unwind.queuedAssets?.length
+                    ? `Unwind enabled. Queued: ${unwind.queuedAssets.slice(0, 12).join(', ')}${unwind.queuedAssets.length > 12 ? '…' : ''}`
+                    : 'Unwind enabled. No unwanted inventory queued.'
+                  : 'Unwind disabled.'
+              }
+            >
+              Unwind: {unwind?.enabled ? (unwind.queuedAssets?.length ? `Queued (${unwind.queuedAssets.length})` : 'Idle') : 'Off'}
+            </Chip>
+
+            <Chip
+              tone={quotePools?.enabled ? (quotePools.topUpsAttempted && quotePools.topUpsOk < quotePools.topUpsAttempted ? 'warn' : 'good') : 'neutral'}
+              title={
+                quotePools?.enabled
+                  ? `Quote pools enabled. Top-ups OK: ${quotePools.topUpsOk}/${quotePools.topUpsAttempted}.`
+                  : 'Quote pools disabled.'
+              }
+            >
+              Pools: {quotePools?.enabled ? 'On' : 'Off'}
+            </Chip>
+            <Chip
               tone={aiMode === 'gated-live' ? 'good' : aiMode === 'advisory' ? 'info' : 'neutral'}
               title={aiMode === 'gated-live' ? 'AI gated-live: AI proposes actions; engine executes only if all safety gates pass.' : aiMode === 'advisory' ? 'AI advisory: AI suggestions only.' : 'AI off.'}
             >
@@ -273,6 +304,32 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
             <div className="kv">
               <div className="label">Quote assets</div>
               <div className="value">{universe?.quoteAssets?.length ? universe.quoteAssets.join(', ') : '—'}</div>
+            </div>
+            <div className="kv">
+              <div className="label">Unwind</div>
+              <div className="value">
+                {unwind?.enabled ? (unwind.queuedAssets?.length ? `Queued (${unwind.queuedAssets.length})` : 'Active (idle)') : 'Disabled'}
+              </div>
+              <div className="muted">{unwind?.enabled && unwind.queuedAssets?.length ? unwind.queuedAssets.slice(0, 8).join(', ') : ''}</div>
+            </div>
+
+            <div className="kv">
+              <div className="label">Quote pools</div>
+              <div className="value">
+                {quotePools?.enabled
+                  ? quotePools.targets?.length
+                    ? `Targets (${quotePools.targets.length})`
+                    : 'Enabled'
+                  : 'Disabled'}
+              </div>
+              <div className="muted">
+                {quotePools?.enabled && quotePools.targets?.length
+                  ? quotePools.targets
+                      .slice(0, 3)
+                      .map((t) => `${t.asset}:${Math.round(t.targetPct * 100)}%`)
+                      .join(' · ')
+                  : ''}
+              </div>
             </div>
             <div className="kv">
               <div className="label">AI model</div>

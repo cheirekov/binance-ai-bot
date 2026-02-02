@@ -261,6 +261,25 @@ export interface StrategyResponsePayload {
   // Convenience mirror of universe.quoteAssets (used by UI + debug tooling).
   resolvedQuoteAssets?: string[];
 
+  unwind?: {
+    enabled: boolean;
+    queuedAssets: string[];
+    at?: number;
+    lastPlacedAt?: number;
+    lastOrdersPlaced?: number;
+  };
+
+  quotePools?: {
+    enabled: boolean;
+    homeAsset: string;
+    equityHome?: number;
+    targets: Array<{ asset: string; targetPct: number }>;
+    topUpsAttempted: number;
+    topUpsOk: number;
+    skipped: Record<string, string>;
+    at: number;
+  };
+
   aiAutonomy?: { profile: AiAutonomyProfile; capabilities: AiAutonomyCapabilities };
   aiCoach?: {
     enabled: boolean;
@@ -428,6 +447,26 @@ export interface PersistedPayload {
       count: number;
       lastAt?: number;
     };
+
+    unwind?: {
+      enabled: boolean;
+      queuedAssets: string[];
+      at?: number;
+      lastPlacedAt?: number;
+      lastOrdersPlaced?: number;
+    };
+
+    quotePools?: {
+      enabled: boolean;
+      homeAsset: string;
+      equityHome?: number;
+      targets: Array<{ asset: string; targetPct: number }>;
+      topUpsAttempted: number;
+      topUpsOk: number;
+      skipped: Record<string, string>;
+      at: number;
+    };
+
     aiSweeps?: {
       date: string;
       count: number;

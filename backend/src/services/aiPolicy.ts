@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { callJson } from '../ai/jsonCall.js';
 import { get24hStats, getBalances } from '../binance/client.js';
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config } from '../config.js';
@@ -10,12 +11,33 @@ import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta } from './persistence.js';
 import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
-import { callJson } from '../ai/jsonCall.js';
-
 const persisted = getPersistedState();
 // OpenAI client is provided by backend/src/ai/openai.ts via callJson().
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
+
+const getBlockedState = () => {
+  const governorState = persisted.meta?.riskGovernor?.decision?.state ?? null;
+  if (governorState === 'HALT') return { blocked: true as const, reason: 'Risk Governor HALT' };
+  if (persisted.meta?.emergencyStop) return { blocked: true as const, reason: 'Emergency stop' };
+  // Daily loss cap is enforced by enabling emergencyStop (single source of truth).
+  return { blocked: false as const, reason: '' };
+};
+
+const canCallWhenBlocked = (now: number) => {
+  const blocked = getBlockedState();
+  if (!blocked.blocked) return { ok: true as const, blocked };
+
+  if (config.aiPolicyCallWhenBlocked === 'always') return { ok: true as const, blocked };
+
+  if (config.aiPolicyCallWhenBlocked === 'hourly') {
+    const last = persisted.meta?.aiPolicyBlockedMonitorAt ?? 0;
+    const ok = !last || now - last >= 60 * 60_000;
+    return { ok, blocked, reason: ok ? undefined : 'blocked_hourly_cooldown' };
+  }
+
+  return { ok: false as const, blocked, reason: 'blocked_never' };
+};
 
 const tuneSchema = z
   .object({
@@ -141,6 +163,7 @@ Return ONLY a JSON object with keys:
 Hard rules:
 - NEVER invent symbols or positionKey. Choose ONLY from the provided lists.
 - NEVER invent config keys. If proposing tune, use ONLY the allowed keys and keep values within provided bounds.
+- If blocked=true, you MUST choose action=HOLD (the bot cannot act).
 - If you are uncertain, choose HOLD.
 - Prefer risk control over activity.`;
 
@@ -221,6 +244,22 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
   if (config.aiMode === 'off') return null;
 
   const now = Date.now();
+
+  // Token hygiene: skip OpenAI calls when the bot can't act (unless explicitly opted in).
+  const blockedGate = canCallWhenBlocked(now);
+  if (!blockedGate.ok) {
+    const decision: AiPolicyDecision = {
+      at: now,
+      mode: config.aiMode,
+      action: 'HOLD',
+      confidence: 0.0,
+      reason: `AI policy skipped: ${blockedGate.blocked.reason}`,
+      model: config.aiPolicyModel,
+    };
+    persistMeta(persisted, { aiPolicy: { ...getPolicyMeta(), lastDecision: decision } });
+    return decision;
+  }
+
   const gate = canCallPolicyNow(now);
   if (!gate.ok) return null;
 
@@ -308,6 +347,8 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
         : undefined;
 
     const payload = {
+      blocked: blockedGate.blocked.blocked,
+      blockedReason: blockedGate.blocked.blocked ? blockedGate.blocked.reason : undefined,
       venue: config.tradeVenue,
       homeAsset: config.homeAsset,
       portfolioEnabled: config.portfolioEnabled,
@@ -357,16 +398,22 @@ export const runAiPolicy = async (seedSymbol?: string): Promise<AiPolicyDecision
     const decision: AiPolicyDecision = {
       at: now,
       mode: config.aiMode,
-      action: parsed.action,
+      action: blockedGate.blocked.blocked ? 'HOLD' : parsed.action,
       symbol: parsed.symbol?.toUpperCase(),
       horizon: parsed.horizon as Horizon | undefined,
       positionKey: parsed.positionKey,
       confidence: parsed.confidence,
-      reason: parsed.reason,
+      reason: blockedGate.blocked.blocked
+        ? `Blocked: ${blockedGate.blocked.reason}. Model reason: ${parsed.reason}`.slice(0, 400)
+        : parsed.reason,
       model: config.aiPolicyModel,
       tune: parsed.tune as AiPolicyTuning | undefined,
       sweepUnusedToHome: parsed.sweepUnusedToHome,
     };
+
+    if (blockedGate.blocked.blocked && config.aiPolicyCallWhenBlocked === 'hourly') {
+      persistMeta(persisted, { aiPolicyBlockedMonitorAt: now });
+    }
 
     persistMeta(persisted, { aiPolicy: { ...nextMeta, lastDecision: decision } });
     return decision;

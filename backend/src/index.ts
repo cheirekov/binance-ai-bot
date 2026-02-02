@@ -2,6 +2,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { FastifyBaseLogger } from 'fastify';
 
+import { startAiCoach } from './ai/coach.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { backtestRoutes } from './routes/backtest.js';
@@ -10,7 +11,6 @@ import { healthRoutes } from './routes/health.js';
 import { ordersRoutes } from './routes/orders.js';
 import { statsRoutes } from './routes/stats.js';
 import { strategyRoutes } from './routes/strategy.js';
-import { startAiCoach } from './ai/coach.js';
 import { startScheduler } from './services/scheduler.js';
 import { initSqliteBestEffort } from './services/sqlite.js';
 

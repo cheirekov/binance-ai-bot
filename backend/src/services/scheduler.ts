@@ -2,9 +2,11 @@ import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { errorToLogObject } from '../utils/errors.js';
 import { autoTradeTick } from './autoTrader.js';
+import { quotePoolsTick } from './quotePools.js';
 import { riskGovernorTick } from './riskGovernor.js';
 import { refreshBestSymbol, refreshStrategies } from './strategyService.js';
 import { tradeSyncTick } from './tradeSync.js';
+import { unwindTick } from './unwind.js';
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -33,7 +35,22 @@ const runOnce = async () => {
 
     // Risk Governor runs on live equity + indicators (no DB dependency). Best-effort: failures must not stop trading loop.
     await riskGovernorTick(symbolToTrade);
+
+    // Quote pools run best-effort (top-ups only) and must never run during HALT/emergency stop (enforced inside quotePoolsTick).
+    try {
+      await quotePoolsTick();
+    } catch (error) {
+      logger.warn({ err: errorToLogObject(error) }, 'Quote pools tick failed');
+    }
+
     await autoTradeTick(symbolToTrade);
+
+    // Unwind runs best-effort and must never run during HALT/emergency stop (enforced inside unwindTick).
+    try {
+      await unwindTick();
+    } catch (error) {
+      logger.warn({ err: errorToLogObject(error) }, 'Unwind tick failed');
+    }
 
     // Trade sync runs in the background (never blocks the trading tick).
     void tradeSyncTick();

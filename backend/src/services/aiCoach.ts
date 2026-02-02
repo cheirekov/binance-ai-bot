@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { callJson } from '../ai/jsonCall.js';
 import { get24hStats, getLatestPrice } from '../binance/client.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
@@ -10,10 +11,8 @@ import { applyAiTuning } from './aiTuning.js';
 import { pauseGridBuys, resumeGridBuys, startGrid, stopGrid } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta } from './persistence.js';
-import { getPnlReconcile,persistAiCoachLog } from './sqlite.js';
+import { getPnlReconcile, persistAiCoachLog } from './sqlite.js';
 import { addAutoBlacklistSymbol } from './symbolPolicy.js';
-
-import { callJson } from '../ai/jsonCall.js';
 
 const persisted = getPersistedState();
 // OpenAI client is provided by backend/src/ai/openai.ts via callJson().

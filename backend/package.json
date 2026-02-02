@@ -10,8 +10,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "lint": "eslint --ext .ts src",
+    "lint:fix": "eslint --ext .ts src --fix",
     "test": "vitest run --coverage",
-    "format": "prettier --write \"src/**/*.{ts,tsx}\""
+    "format": "npm run lint:fix && prettier --write \"src/**/*.{ts,tsx}\""
   },
   "dependencies": {
     "@binance/connector": "^3.1.0",

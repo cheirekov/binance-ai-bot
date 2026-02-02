@@ -154,6 +154,11 @@ export const config = {
   // Trade universe (controls candidates + execution gate)
   tradeUniverse: listFromEnvUpper(process.env.TRADE_UNIVERSE, []),
 
+  // Multi-hop quote->home rates.
+  bridgeAssets: listFromEnvUpper(process.env.BRIDGE_ASSETS, ['BTC', 'ETH', 'BNB', 'USDT', 'USDC', 'EUR']),
+  // Global asset exclusion (affects rates + discovery). Default empty; users can set EXCLUDED_ASSETS=USDT, etc.
+  excludedAssets: listFromEnvUpper(process.env.EXCLUDED_ASSETS, []),
+
   // QUOTE_ASSETS supports "AUTO" (resolved at runtime; see strategyService).
   quoteAssetsMode: ((stripInlineComment(process.env.QUOTE_ASSETS) ?? '').trim().toUpperCase() === 'AUTO'
     ? 'adaptive'
@@ -164,8 +169,9 @@ export const config = {
     (stripInlineComment(process.env.QUOTE_ASSETS) ?? '').trim().toUpperCase() === 'AUTO'
       ? []
       : listFromEnvUpper(process.env.QUOTE_ASSETS, ['USDC', 'EUR']),
-  // EU-safe default: exclude USDT (and any other forbidden quotes) from AUTO resolution and discovery.
-  excludedQuoteAssets: listFromEnvUpper(process.env.EXCLUDED_QUOTE_ASSETS, ['USDT']),
+  // Back-compat alias: EXCLUDED_QUOTE_ASSETS (older) + EXCLUDED_ASSETS (new). Prefer EXCLUDED_ASSETS.
+  // IMPORTANT: default must NOT hardcode bans (USDT allowed unless the operator excludes it explicitly).
+  excludedQuoteAssets: listFromEnvUpper(process.env.EXCLUDED_QUOTE_ASSETS, []),
 
   tradeDenylist: listFromEnvUpper(process.env.TRADE_DENYLIST, []),
 
@@ -208,6 +214,21 @@ export const config = {
   portfolioMaxAllocPct: numberFromEnv(process.env.PORTFOLIO_MAX_ALLOC_PCT, 50),
   portfolioMaxPositions: numberFromEnv(process.env.PORTFOLIO_MAX_POSITIONS, 3),
   conversionEnabled: boolFromEnv(process.env.CONVERSION_ENABLED, false) && tradeVenueFromEnv(process.env.TRADE_VENUE) !== 'futures',
+
+  convertTtlSeconds: Math.max(1, Math.floor(numberFromEnv(process.env.CONVERT_TTL_SECONDS, 15))),
+  convertMaxRetries: Math.max(0, Math.floor(numberFromEnv(process.env.CONVERT_MAX_RETRIES, 2))),
+  convertSlippageBps: Math.max(0, numberFromEnv(process.env.CONVERT_SLIPPAGE_BPS, 15)),
+  convertMode: oneOf(process.env.CONVERT_MODE, ['limit_ttl', 'market'] as const, 'limit_ttl'),
+
+  quotePoolTargetsRaw: optionalStringFromEnv(process.env.QUOTE_POOL_TARGETS),
+  quotePoolRebalanceBps: Math.max(0, numberFromEnv(process.env.QUOTE_POOL_REBALANCE_BPS, 80)),
+
+  unwindEnabled: boolFromEnv(process.env.UNWIND_ENABLED, false),
+  unwindMode: oneOf(process.env.UNWIND_MODE, ['ladder', 'market'] as const, 'ladder'),
+  unwindLadderPctsRaw: optionalStringFromEnv(process.env.UNWIND_LADDER_PCTS, '0.5,1.0,2.0'),
+  unwindRequoteMinutes: Math.max(1, Math.floor(numberFromEnv(process.env.UNWIND_REQUOTE_MINUTES, 30))),
+  unwindExcludedAssets: listFromEnvUpper(process.env.UNWIND_EXCLUDED_ASSETS, ['BTC', 'ETH', 'BNB', 'USDT', 'USDC', 'EUR']),
+
   riskOffSentiment: numberFromEnv(process.env.RISK_OFF_SENTIMENT, -0.5),
   gridEnabled: boolFromEnv(process.env.GRID_ENABLED, false) && tradeVenueFromEnv(process.env.TRADE_VENUE) === 'spot',
   gridAutoDiscover: boolFromEnv(process.env.GRID_AUTO_DISCOVER, true),
@@ -263,6 +284,7 @@ export const config = {
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),
   aiPolicyCallWhenBlocked: oneOf(process.env.AI_POLICY_CALL_WHEN_BLOCKED, ['never', 'hourly', 'always'] as const, 'never'),
+  minUniverseCandidates: Math.max(1, Math.floor(numberFromEnv(process.env.MIN_UNIVERSE_CANDIDATES, 20))),
   aiPolicyMaxGridAllocIncreasePctPerDay: numberFromEnv(process.env.AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY, 5),
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),

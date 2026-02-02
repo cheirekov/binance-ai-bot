@@ -1,3 +1,4 @@
+import { runAiPolicy } from '../ai/policy.js';
 import {
   cancelOcoOrder,
   get24hStats,
@@ -16,8 +17,8 @@ import { logger } from '../logger.js';
 import { AiPolicyTuning, Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { resolveAutonomy } from './aiAutonomy.js';
-import { runAiPolicy } from '../ai/policy.js';
 import { applyAiTuning } from './aiTuning.js';
+import { ensureAssetBalance } from './conversionRouter.js';
 import { pauseGridBuys, resumeGridBuys, startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
@@ -196,6 +197,8 @@ const balanceMap = (balances: Balance[]) =>
 
 const balanceTotalsMap = (balances: Balance[]) =>
   new Map(balances.map((b) => [b.asset.toUpperCase(), { free: b.free, locked: b.locked, total: b.free + b.locked }]));
+
+const clampNonNegative = (n: number) => (Number.isFinite(n) ? Math.max(0, n) : 0);
 
 const numberFromUnknown = (value: unknown): number | null => {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
@@ -685,7 +688,7 @@ const enforceDailyLossCap = async (seedSymbol?: string): Promise<boolean> => {
 };
 
 const ensureQuoteAsset = async (
-  symbols: SymbolInfo[],
+  _symbols: SymbolInfo[],
   balances: Balance[],
   homeAsset: string,
   quoteAsset: string,
@@ -693,43 +696,28 @@ const ensureQuoteAsset = async (
 ): Promise<{ balances: Balance[]; note?: string }> => {
   const home = homeAsset.toUpperCase();
   const quote = quoteAsset.toUpperCase();
+  const required = clampNonNegative(requiredQuote);
+
   if (quote === home) return { balances };
+  if (required <= 0) return { balances };
 
   if (!config.conversionEnabled) {
     return { balances, note: `Conversions disabled; need ${quote}` };
   }
 
   const freeBy = balanceMap(balances);
-  const freeQuote = freeBy.get(quote) ?? 0;
-  if (freeQuote >= requiredQuote) return { balances };
+  const freeQuote = clampNonNegative(freeBy.get(quote) ?? 0);
+  if (freeQuote >= required) return { balances };
 
-  const conversion = findConversion(symbols, home, quote);
-  if (!conversion) {
-    return { balances, note: `No conversion path ${home}->${quote}` };
-  }
-
-  const missing = requiredQuote - freeQuote;
-  if (missing <= 0) return { balances };
-
-  const buffer = 1.001 + config.slippageBps / 10000;
+  // Prefer conversionRouter (limit+TTL by default) and 2-hop routes via BRIDGE_ASSETS.
   try {
-    if (conversion.side === 'BUY') {
-      const qty = missing * buffer;
-      const order = await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
-      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'BUY', fromAsset: home, toAsset: quote, homeAsset: home });
-    } else {
-      const snap = await get24hStats(conversion.symbol);
-      const qtyFrom = snap.price > 0 ? (missing / snap.price) * buffer : 0;
-      const freeHome = freeBy.get(home) ?? 0;
-      if (qtyFrom <= 0 || freeHome <= 0) {
-        return { balances, note: `Insufficient ${home} to convert` };
-      }
-      const order = await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: Math.min(qtyFrom, freeHome), type: 'MARKET' });
-      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'SELL', fromAsset: home, toAsset: quote, homeAsset: home });
+    const res = await ensureAssetBalance(quote, required, home);
+    if (!res.ok) {
+      return { balances, note: res.reason ? `Conversion blocked: ${res.reason}` : 'Conversion blocked' };
     }
     bumpConversionCounter();
     const refreshed = await refreshBalancesFromState();
-    return { balances: refreshed, note: `Converted ${home}->${quote}` };
+    return { balances: refreshed, note: `Funded ${quote}` };
   } catch (error) {
     logger.warn({ err: errorToLogObject(error), conversion: `${home}->${quote}` }, 'Conversion to quote failed');
     return { balances, note: `Conversion failed: ${errorToString(error)}` };

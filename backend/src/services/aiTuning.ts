@@ -2,6 +2,7 @@ import { applyRuntimeConfigOverrides, config } from '../config.js';
 import { logger } from '../logger.js';
 import { AiPolicyTuning, PersistedPayload } from '../types.js';
 import { getPersistedState, persistMeta } from './persistence.js';
+import { simulateUniverseCandidateCount } from './strategyService.js';
 
 const persisted = getPersistedState();
 
@@ -76,6 +77,47 @@ const clampToEnvelopeAiOnly = (tune: AiPolicyTuning, notes: string[]) => {
   return next;
 };
 
+const enforceUniverseViabilityAiOnly = (tune: AiPolicyTuning, notes: string[]) => {
+  // Only applies to tightening filters that impact discovery. Manual tuning should never be blocked by this guard.
+  const currentMinVol = config.maxVolatilityPercent;
+  const currentMinVolFloor = config.minQuoteVolume;
+
+  const wantsTightenMinQuote =
+    tune.minQuoteVolume !== undefined &&
+    Number.isFinite(tune.minQuoteVolume) &&
+    tune.minQuoteVolume > currentMinVolFloor;
+
+  const wantsTightenVol =
+    tune.maxVolatilityPercent !== undefined &&
+    Number.isFinite(tune.maxVolatilityPercent) &&
+    tune.maxVolatilityPercent < currentMinVol;
+
+  if (!wantsTightenMinQuote && !wantsTightenVol) return tune;
+
+  const sim = simulateUniverseCandidateCount({
+    minQuoteVolume: wantsTightenMinQuote ? tune.minQuoteVolume : undefined,
+    maxVolatilityPercent: wantsTightenVol ? tune.maxVolatilityPercent : undefined,
+  });
+
+  if (!sim.ok) {
+    notes.push('Universe viability guard: skipped (no cached universe metrics yet).');
+    return tune;
+  }
+
+  const min = Math.max(1, config.minUniverseCandidates);
+  if (sim.count >= min) return tune;
+
+  notes.push(
+    `Universe viability guard: rejected tightening (candidates ${sim.count} < MIN_UNIVERSE_CANDIDATES ${min}).`,
+  );
+
+  const next: AiPolicyTuning = { ...tune };
+  if (wantsTightenMinQuote) delete next.minQuoteVolume;
+  if (wantsTightenVol) delete next.maxVolatilityPercent;
+
+  return next;
+};
+
 export type ApplyAiTuningResult =
   | {
       ok: true;
@@ -112,6 +154,10 @@ export const applyAiTuning = (params: {
   // AI-only: clamp to the operator-defined tuning envelope (adds an extra safety boundary over absolute runtime bounds).
   if (params.source === 'ai') {
     final = clampToEnvelopeAiOnly(final, notes);
+
+    // AI-only: tuning viability guard.
+    // If tightening would reduce the trade universe below MIN_UNIVERSE_CANDIDATES, reject the tightening keys.
+    final = enforceUniverseViabilityAiOnly(final, notes);
   }
 
   // Clamp daily increases for GRID_MAX_ALLOC_PCT (AI only).
@@ -126,6 +172,9 @@ export const applyAiTuning = (params: {
   }
 
   if (Object.keys(final).length === 0) {
+    if (notes.length) {
+      logger.info({ notes }, 'AI tuning fully blocked by safety clamps');
+    }
     return { ok: false, at: now, error: 'Tuning was fully blocked by safety clamps.' };
   }
 

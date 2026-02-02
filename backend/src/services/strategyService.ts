@@ -8,6 +8,7 @@ import { errorToLogObject } from '../utils/errors.js';
 import { resolveAutonomy } from './aiAutonomy.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistMeta, persistStrategy } from './persistence.js';
+import { getRate } from './rates.js';
 import { getSymbolBlockInfo, isSymbolViewAllowed, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const currentRiskSettings = (): RiskSettings => ({
@@ -25,6 +26,11 @@ let activeSymbol =
   config.defaultSymbol;
 let lastCandidates: { symbol: string; score: number }[] = persisted.meta?.rankedCandidates ?? [];
 let lastAutoSelectAt: number | null = persisted.meta?.autoSelectUpdatedAt ?? null;
+
+// Universe viability guard (AI tuning):
+// Store recent per-symbol metrics so we can estimate candidate count after tightening (no extra API calls).
+let lastUniverseMetricsAt = 0;
+let lastUniverseMetrics: Array<{ symbol: string; quoteVolumeHome: number; volatilityPct: number }> = [];
 
 // Resolved quote assets used for discovery/scoring (especially when QUOTE_ASSETS=AUTO).
 let resolvedQuoteAssets: string[] = persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets;
@@ -163,55 +169,13 @@ const getQuoteToHomeRate = async (quoteAsset: string, homeAsset: string): Promis
 
   const cacheKey = `${quote}_${home}`;
   const cached = quoteToHomeCache[cacheKey];
-  if (cached && Date.now() - cached.fetchedAt < 60_000) return cached.rate;
+  if (cached && Date.now() - cached.fetchedAt < 30_000) return cached.rate;
 
-  const directSymbol = `${quote}${home}`;
-  try {
-    const snap = await get24hStats(directSymbol);
-    quoteToHomeCache[cacheKey] = { rate: snap.price, fetchedAt: Date.now() };
-    return snap.price;
-  } catch {
-    // ignore
-  }
-
-  const inverseSymbol = `${home}${quote}`;
-  try {
-    const snap = await get24hStats(inverseSymbol);
-    const rate = snap.price > 0 ? 1 / snap.price : null;
-    if (rate) quoteToHomeCache[cacheKey] = { rate, fetchedAt: Date.now() };
+  // Multi-hop rate via graph (spot exchangeInfo + tickers). This unlocks JPY/BRL/BTC/ETH quotes.
+  const rate = await getRate(quote, home);
+  if (rate) {
+    quoteToHomeCache[cacheKey] = { rate, fetchedAt: Date.now() };
     return rate;
-  } catch {
-    // ignore
-  }
-
-  // Fallback to spot conversion pairs (useful when running futures venue but HOME_ASSET is USDC/EUR).
-  try {
-    const res = await fetch(`${config.binanceBaseUrl}/api/v3/ticker/price?symbol=${encodeURIComponent(directSymbol)}`);
-    if (res.ok) {
-      const data = (await res.json()) as { price?: string };
-      const price = data?.price ? Number(data.price) : Number.NaN;
-      if (Number.isFinite(price) && price > 0) {
-        quoteToHomeCache[cacheKey] = { rate: price, fetchedAt: Date.now() };
-        return price;
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  try {
-    const res = await fetch(`${config.binanceBaseUrl}/api/v3/ticker/price?symbol=${encodeURIComponent(inverseSymbol)}`);
-    if (res.ok) {
-      const data = (await res.json()) as { price?: string };
-      const price = data?.price ? Number(data.price) : Number.NaN;
-      if (Number.isFinite(price) && price > 0) {
-        const rate = 1 / price;
-        quoteToHomeCache[cacheKey] = { rate, fetchedAt: Date.now() };
-        return rate;
-      }
-    }
-  } catch {
-    // ignore
   }
 
   return null;
@@ -433,6 +397,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     aiStrategyModel: config.aiStrategyModel,
     aiPolicy: persisted.meta?.aiPolicy,
     runtimeConfig: persisted.meta?.runtimeConfig,
+    unwind: persisted.meta?.unwind ?? undefined,
+    quotePools: persisted.meta?.quotePools ?? undefined,
     activeSymbol,
     autoSelectUpdatedAt: lastAutoSelectAt,
     rankedCandidates: rankedCandidates.slice(0, 25),
@@ -470,6 +436,25 @@ const scoreSnapshot = (snapshot: {
 
 const looksLeverageToken = (symbol: string) => /(UP|DOWN|BULL|BEAR)$/.test(symbol);
 
+export const simulateUniverseCandidateCount = (overrides?: { minQuoteVolume?: number; maxVolatilityPercent?: number }) => {
+  const minQuoteVolume = overrides?.minQuoteVolume !== undefined ? overrides.minQuoteVolume : config.minQuoteVolume;
+  const maxVolatilityPercent =
+    overrides?.maxVolatilityPercent !== undefined ? overrides.maxVolatilityPercent : config.maxVolatilityPercent;
+
+  const floor = Math.max(0, minQuoteVolume);
+  const volCap = Math.max(0, maxVolatilityPercent);
+
+  if (!lastUniverseMetrics.length) return { ok: false as const, reason: 'no_metrics' as const, at: lastUniverseMetricsAt, count: 0 };
+
+  const count = lastUniverseMetrics.filter((m) => m.quoteVolumeHome >= floor && m.volatilityPct <= volCap).length;
+  return {
+    ok: true as const,
+    at: lastUniverseMetricsAt,
+    count,
+    params: { minQuoteVolume: floor, maxVolatilityPercent: volCap },
+  };
+};
+
 export const refreshBestSymbol = async (options?: { setActiveSymbol?: boolean; refreshBestSymbolStrategies?: boolean }) => {
   const baseSymbols = config.tradeUniverse.length ? config.tradeUniverse : [config.defaultSymbol];
   let symbols = [...baseSymbols];
@@ -502,37 +487,55 @@ export const refreshBestSymbol = async (options?: { setActiveSymbol?: boolean; r
   const exchangeSymbols = await fetchTradableSymbols();
   debug.counts.totalExchangeSymbols = exchangeSymbols.length;
 
-  // Resolve allowed quote assets (AUTO is EU-friendly by default: excludes USDT).
-  const resolveAllowedQuoteAssets = (): string[] => {
-    const excluded = new Set((config.excludedQuoteAssets ?? []).map((s) => s.toUpperCase()));
+  // Resolve allowed quote assets.
+  // - If QUOTE_ASSETS is explicit, use it (minus exclusions).
+  // - If QUOTE_ASSETS=AUTO, allow all quotes on-exchange (minus exclusions) but require quote->home rate resolvable.
+  const resolveAllowedQuoteAssets = async (): Promise<string[]> => {
+    const excluded = new Set([
+      ...(config.excludedAssets ?? []).map((s) => s.toUpperCase()),
+      ...(config.excludedQuoteAssets ?? []).map((s) => s.toUpperCase()),
+    ]);
 
     const raw =
       config.quoteAssetsMode === 'adaptive'
-        ? [config.homeAsset, 'EUR', 'BTC', 'ETH', 'BNB'].map((s) => s.toUpperCase())
+        ? Array.from(new Set(exchangeSymbols.map((s) => s.quoteAsset.toUpperCase()))).filter(Boolean)
         : (config.quoteAssets ?? []).map((s) => s.toUpperCase());
 
-    const uniq = Array.from(new Set(raw)).filter(Boolean).filter((q) => !excluded.has(q));
+    const uniq = Array.from(new Set(raw))
+      .map((q) => q.toUpperCase())
+      .filter(Boolean)
+      .filter((q) => q.length >= 2)
+      .filter((q) => !excluded.has(q));
 
+    // Ensure quote->home rate exists (direct/reverse or 2-hop via BRIDGE_ASSETS).
     const home = config.homeAsset.toUpperCase();
-    const hasDirect = (quote: string) => {
-      if (quote === home) return true;
-      const direct = `${quote}${home}`;
-      const inverse = `${home}${quote}`;
-      return exchangeSymbols.some((s) => s.symbol === direct && s.status === 'TRADING') || exchangeSymbols.some((s) => s.symbol === inverse && s.status === 'TRADING');
-    };
-
-    // Only keep quotes that can be normalized into HOME via a direct market (same shape as getQuoteToHomeRate()).
-    return uniq.filter((q) => hasDirect(q));
+    const out: string[] = [];
+    for (const quote of uniq) {
+      if (quote === home) {
+        out.push(quote);
+        continue;
+      }
+      const rate = await getRate(quote, home);
+      if (rate && Number.isFinite(rate) && rate > 0) {
+        out.push(quote);
+      } else {
+        debug.counts.missingQuoteToHome += 1;
+      }
+    }
+    return out;
   };
 
-  resolvedQuoteAssets = resolveAllowedQuoteAssets();
+  resolvedQuoteAssets = await resolveAllowedQuoteAssets();
   debug.allowedQuoteAssetsResolved = resolvedQuoteAssets;
 
   // Persist resolved quotes for UI/debug even if later scoring fails.
   persistMeta(persisted, { resolvedQuoteAssets });
 
   const allowedQuoteSet = new Set(resolvedQuoteAssets.map((s) => s.toUpperCase()));
-  const excludedQuoteSet = new Set((config.excludedQuoteAssets ?? []).map((s) => s.toUpperCase()));
+  const excludedQuoteSet = new Set([
+    ...(config.excludedAssets ?? []).map((s) => s.toUpperCase()),
+    ...(config.excludedQuoteAssets ?? []).map((s) => s.toUpperCase()),
+  ]);
 
   // If the user provided an explicit universe, treat it as the universe for auto-select.
   if (config.autoDiscoverSymbols && config.tradeUniverse.length === 0) {
@@ -634,6 +637,8 @@ export const refreshBestSymbol = async (options?: { setActiveSymbol?: boolean; r
 
   const candidates: { symbol: string; score: number }[] = [];
 
+  const metrics: Array<{ symbol: string; quoteVolumeHome: number; volatilityPct: number }> = [];
+
   const adaptiveMinQuoteVolumeHome = () => {
     // Home-normalized quote volume floor (sane bounds). Uses USD-ish MAX_POSITION_SIZE_USDT as a proxy.
     const base = Math.max(100_000, Math.max(0, config.maxPositionSizeUsdt) * 500);
@@ -670,6 +675,10 @@ export const refreshBestSymbol = async (options?: { setActiveSymbol?: boolean; r
       }
 
       const quoteVolHome = (snap.quoteVolume ?? 0) * quoteToHome;
+
+      // Store metrics for tuning viability simulation (even if the symbol is filtered out right now).
+      metrics.push({ symbol: symbol.toUpperCase(), quoteVolumeHome: quoteVolHome, volatilityPct: volPct });
+
       if (quoteVolHome < minQuoteVolumeHomeFloor) {
         debug.counts.minQuoteVolumeFiltered += 1;
         continue;
@@ -694,6 +703,10 @@ export const refreshBestSymbol = async (options?: { setActiveSymbol?: boolean; r
     });
     throw new Error('No symbols could be scored. Check QUOTE_ASSETS/EXCLUDED_QUOTE_ASSETS, denylist, or API connectivity.');
   }
+
+  // Update viability guard cache (best-effort).
+  lastUniverseMetricsAt = debug.at;
+  lastUniverseMetrics = metrics;
 
   candidates.sort((a, b) => b.score - a.score);
 
