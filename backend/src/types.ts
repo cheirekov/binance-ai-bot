@@ -4,11 +4,53 @@ export type Side = 'BUY' | 'SELL';
 
 export type AiPolicyMode = 'off' | 'advisory' | 'gated-live';
 
-export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC';
+export type AiPolicyAction = 'HOLD' | 'OPEN' | 'CLOSE' | 'PANIC' | 'PAUSE_GRID' | 'RESUME_GRID' | 'REDUCE_RISK';
+
+export type AiAutonomyProfile = 'safe' | 'standard' | 'pro' | 'aggressive';
+
+export interface AiAutonomyCapabilities {
+  canAutoApplyTuningTighten: boolean;
+  canAutoApplyTuningRelax: boolean;
+  canAutoSweepToHome: boolean;
+  canPauseGrid: boolean;
+  canResumeGrid: boolean;
+  canAutoBlacklistSymbols: boolean;
+  canEnableUnwindPlans: boolean;
+}
+
+export type RiskGovernorState = 'NORMAL' | 'CAUTION' | 'HALT';
+
+export type RiskGovernorReasonCode =
+  | 'drawdown_daily'
+  | 'drawdown_rolling'
+  | 'trend'
+  | 'fee_burn'
+  | 'vol_spike'
+  | 'manual';
+
+export interface RiskGovernorDecision {
+  state: RiskGovernorState;
+  since: number;
+  reasons: Array<{ code: RiskGovernorReasonCode; detail: string }>;
+  entriesPaused: boolean;
+  gridBuyPausedGlobal: boolean;
+}
+
+export interface RiskGovernorSnapshot {
+  decision: RiskGovernorDecision | null;
+  dailyBaseline: { dayKey: string; equityHome: number; homeAsset: string; at: number } | null;
+  rollingEquity: Array<{ at: number; equityHome: number }>;
+  rollingFees: Array<{ at: number; feesHome: number; notionalHome: number; fills: number }>;
+  lastEquityHome: number;
+  homeAsset: string;
+  missingAssets?: string[];
+  updatedAt: number;
+}
 
 export interface AiPolicyTuning {
   minQuoteVolume?: number;
   maxVolatilityPercent?: number;
+  riskPerTradeBasisPoints?: number;
   autoTradeHorizon?: Horizon;
   portfolioMaxAllocPct?: number;
   portfolioMaxPositions?: number;
@@ -27,6 +69,42 @@ export interface AiPolicyDecision {
   model?: string;
   tune?: AiPolicyTuning;
   sweepUnusedToHome?: boolean;
+}
+
+export type AiCoachProposal =
+  | {
+      type: 'TUNING_UPDATE';
+      changes: AiPolicyTuning;
+      reason: string;
+    }
+  | {
+      type: 'SYMBOL_POLICY';
+      whitelistAdd?: string[];
+      blacklistAdd?: Array<{ symbol: string; ttlMinutes: number; reason: string }>;
+      reason?: string;
+    }
+  | {
+      type: 'GRID_ACTION';
+      symbol: string;
+      action: 'PAUSE_BUYS' | 'RESUME_BUYS' | 'STOP_GRID' | 'START_GRID';
+      reason: string;
+    };
+
+export interface AiCoachProposalRecord {
+  proposal: AiCoachProposal;
+  applied: { applied: boolean; ok?: boolean; error?: string; result?: unknown };
+}
+
+export interface AiCoachSnapshot {
+  at: number;
+  profile: AiAutonomyProfile;
+  governorState?: RiskGovernorState | null;
+  confidence: number;
+  notes?: string[];
+  model?: string;
+  proposals: AiCoachProposalRecord[];
+  skipped?: boolean;
+  skipReason?: string;
 }
 
 export interface MarketSnapshot {
@@ -91,6 +169,9 @@ export interface GridState {
   updatedAt: number;
   lastTickAt?: number;
   lastError?: string;
+  buyPaused?: boolean;
+  buyPauseReason?: string;
+  buyPausedAt?: number;
   ordersByLevel: Record<string, GridOrder>;
   performance?: GridPerformance;
 }
@@ -158,6 +239,35 @@ export interface StrategyResponsePayload {
   maxVolatilityPercent?: number;
   autoTradeHorizon?: Horizon;
   availableSymbols: string[];
+
+  universe?: {
+    mode: 'static' | 'discovery';
+    tradeUniverse: string[];
+    // Resolved quote assets used for discovery/scoring.
+    quoteAssets: string[];
+    tradeDenylist: string[];
+    accountDenylist: Array<{ symbol: string; at: number; reason: string }>;
+    autoBlacklist: Array<{
+      symbol: string;
+      at: number;
+      bannedUntil: number;
+      ttlMinutes: number;
+      reason: string;
+      source?: string;
+      triggers?: string[];
+    }>;
+  };
+
+  // Convenience mirror of universe.quoteAssets (used by UI + debug tooling).
+  resolvedQuoteAssets?: string[];
+
+  aiAutonomy?: { profile: AiAutonomyProfile; capabilities: AiAutonomyCapabilities };
+  aiCoach?: {
+    enabled: boolean;
+    intervalSeconds: number;
+    minEquityUsd: number;
+    latest: AiCoachSnapshot | null;
+  };
   tradeVenue?: 'spot' | 'futures';
   futuresEnabled?: boolean;
   futuresLeverage?: number;
@@ -184,12 +294,20 @@ export interface StrategyResponsePayload {
   positions?: PersistedPayload['positions'];
   grids?: PersistedPayload['grids'];
   gridEnabled?: boolean;
+  riskGovernor?: RiskGovernorDecision | null;
   gridMaxAllocPct?: number;
   gridMaxActiveGrids?: number;
   gridLevels?: number;
   gridRebalanceSeconds?: number;
   equity?: NonNullable<PersistedPayload['meta']>['equity'];
+
+  aiMode?: AiPolicyMode;
+  // Backward-compat (older UI clients)
   aiPolicyMode?: AiPolicyMode;
+
+  aiModel?: string;
+  aiPolicyModel?: string;
+  aiStrategyModel?: string;
   aiPolicy?: NonNullable<PersistedPayload['meta']>['aiPolicy'];
   runtimeConfig?: NonNullable<PersistedPayload['meta']>['runtimeConfig'];
   emergencyStop?: boolean;
@@ -241,6 +359,38 @@ export interface PersistedPayload {
       lastAt?: number;
       lastDecision?: AiPolicyDecision;
     };
+
+    // Token hygiene: when trading is blocked (HALT/emergency stop/etc), optionally allow
+    // an AI policy call at most once per hour for monitoring. This stores the last monitor timestamp.
+    aiPolicyBlockedMonitorAt?: number;
+
+    // Resolved quote assets (especially when QUOTE_ASSETS=AUTO).
+    resolvedQuoteAssets?: string[];
+
+    // Debug snapshot for "why no candidates" troubleshooting (best-effort).
+    universeDebug?: {
+      at: number;
+      allowedQuoteAssetsResolved: string[];
+      counts: {
+        totalExchangeSymbols: number;
+        venueBlocked: number;
+        quoteNotAllowed: number;
+        excludedQuote: number;
+        stableToStable: number;
+        leverageToken: number;
+        policyBlocked: number;
+        missingQuoteToHome: number;
+        volatilityFiltered: number;
+        minQuoteVolumeFiltered: number;
+        selected: number;
+      };
+      top: Array<{
+        symbol: string;
+        score: number;
+        quoteAsset: string;
+        quoteVolumeHome: number;
+      }>;
+    };
     runtimeConfig?: {
       updatedAt: number;
       source?: 'manual' | 'ai';
@@ -262,6 +412,17 @@ export interface PersistedPayload {
       missingAssets?: string[];
     };
     accountBlacklist?: Record<string, { at: number; reason: string }>;
+    autoBlacklist?: Record<
+      string,
+      {
+        at: number;
+        bannedUntil: number;
+        ttlMinutes: number;
+        reason: string;
+        source?: 'ai-coach' | 'trigger' | 'manual';
+        triggers?: string[];
+      }
+    >;
     conversions?: {
       date: string;
       count: number;
@@ -277,5 +438,7 @@ export interface PersistedPayload {
       gridMaxAllocIncreasePct: number;
       lastAt?: number;
     };
+    riskGovernor?: RiskGovernorSnapshot;
+    latestCoach?: AiCoachSnapshot;
   };
 }

@@ -104,7 +104,9 @@ export const StrategyPage = (props: { data: StrategyResponse | null; selectedSym
         <Card eyebrow="Mode" title="Summary">
           <div className="chip-row">
             <Chip tone="info">Venue: {props.data?.tradeVenue ?? 'spot'}</Chip>
-            <Chip tone={props.data?.aiPolicyMode && props.data.aiPolicyMode !== 'off' ? 'good' : 'neutral'}>AI: {props.data?.aiPolicyMode ?? 'off'}</Chip>
+            <Chip tone={(props.data?.aiMode ?? props.data?.aiPolicyMode) && (props.data?.aiMode ?? props.data?.aiPolicyMode) !== 'off' ? 'good' : 'neutral'}>
+              AI Mode: {props.data?.aiMode ?? props.data?.aiPolicyMode ?? 'off'}
+            </Chip>
             <Chip tone={props.data?.gridEnabled ? 'good' : 'neutral'}>Grid: {props.data?.gridEnabled ? 'On' : 'Off'}</Chip>
             <Chip tone={props.data?.portfolioEnabled ? 'good' : 'neutral'}>Portfolio: {props.data?.portfolioEnabled ? 'On' : 'Off'}</Chip>
           </div>
@@ -206,7 +208,10 @@ export const StrategyPage = (props: { data: StrategyResponse | null; selectedSym
                     {Object.values(props.data?.grids ?? {}).map((g) => (
                       <div key={g.symbol} className="candidate-row">
                         <span className="mono">{g.symbol}</span>
-                        <span className="muted">{g.status}</span>
+                        <span className="muted">
+                          {g.status}
+                          {g.buyPaused ? ` · Paused buys (${g.buyPauseReason ?? 'unknown'})` : ''}
+                        </span>
                       </div>
                     ))}
                   </div>

@@ -13,16 +13,25 @@ import {
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
-import { Balance, PersistedPayload } from '../types.js';
+import { AiPolicyTuning, Balance, PersistedPayload } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
-import { runAiPolicy } from './aiPolicy.js';
+import { resolveAutonomy } from './aiAutonomy.js';
+import { runAiPolicy } from '../ai/policy.js';
 import { applyAiTuning } from './aiTuning.js';
-import { startOrSyncGrids } from './gridTrader.js';
+import { pauseGridBuys, resumeGridBuys, startOrSyncGrids } from './gridTrader.js';
 import { getNewsSentiment } from './newsService.js';
 import { getPersistedState, persistLastTrade, persistMeta, persistPosition } from './persistence.js';
-import { persistDecision as persistDecisionSqlite, persistTrade as persistTradeSqlite } from './sqlite.js';
+import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
+import {
+  persistConversionEvent,
+  persistDecision as persistDecisionSqlite,
+  persistEquitySnapshot,
+  persistTrade as persistTradeSqlite,
+  persistTradeFill as persistTradeFillSqlite,
+} from './sqlite.js';
 import { getStrategyResponse, refreshStrategies } from './strategyService.js';
 import { sweepUnusedToHome } from './sweepUnused.js';
+import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const persisted = getPersistedState();
 
@@ -82,7 +91,7 @@ const recordDecision = (decision: AutoTradeDecision) => {
     horizon: decision.horizon,
     action: decision.action,
     reason: decision.reason,
-    mode: config.aiPolicyMode,
+    mode: config.aiMode,
     orderId: decision.orderId,
   });
 };
@@ -97,10 +106,61 @@ const actionFromCloseNote = (note?: string): AutoTradeDecision['action'] => {
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
-const positionVenue = (pos: Position | null | undefined): 'spot' | 'futures' => (pos?.venue ?? 'spot');
+const getRiskGovernorDecision = () => persisted.meta?.riskGovernor?.decision ?? null;
 
-const accountBlacklistSet = () =>
-  new Set(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
+const pickAiTuningForAutoApply = (tune: AiPolicyTuning | null | undefined): AiPolicyTuning => ({
+  minQuoteVolume: tune?.minQuoteVolume,
+  maxVolatilityPercent: tune?.maxVolatilityPercent,
+  riskPerTradeBasisPoints: tune?.riskPerTradeBasisPoints,
+  portfolioMaxPositions: tune?.portfolioMaxPositions,
+  gridMaxAllocPct: tune?.gridMaxAllocPct,
+});
+
+const splitTuningByRiskDirection = (tune: AiPolicyTuning) => {
+  const current = {
+    minQuoteVolume: config.minQuoteVolume,
+    maxVolatilityPercent: config.maxVolatilityPercent,
+    riskPerTradeBasisPoints: config.riskPerTradeBasisPoints,
+    portfolioMaxPositions: config.portfolioMaxPositions,
+    gridMaxAllocPct: config.gridMaxAllocPct,
+  };
+
+  const tighten: AiPolicyTuning = {};
+  const relax: AiPolicyTuning = {};
+
+  if (tune.minQuoteVolume !== undefined && Number.isFinite(tune.minQuoteVolume) && tune.minQuoteVolume !== current.minQuoteVolume) {
+    if (tune.minQuoteVolume >= current.minQuoteVolume) tighten.minQuoteVolume = tune.minQuoteVolume;
+    else relax.minQuoteVolume = tune.minQuoteVolume;
+  }
+  if (tune.maxVolatilityPercent !== undefined && Number.isFinite(tune.maxVolatilityPercent) && tune.maxVolatilityPercent !== current.maxVolatilityPercent) {
+    if (tune.maxVolatilityPercent <= current.maxVolatilityPercent) tighten.maxVolatilityPercent = tune.maxVolatilityPercent;
+    else relax.maxVolatilityPercent = tune.maxVolatilityPercent;
+  }
+  if (
+    tune.riskPerTradeBasisPoints !== undefined &&
+    Number.isFinite(tune.riskPerTradeBasisPoints) &&
+    tune.riskPerTradeBasisPoints !== current.riskPerTradeBasisPoints
+  ) {
+    if (tune.riskPerTradeBasisPoints <= current.riskPerTradeBasisPoints) tighten.riskPerTradeBasisPoints = tune.riskPerTradeBasisPoints;
+    else relax.riskPerTradeBasisPoints = tune.riskPerTradeBasisPoints;
+  }
+  if (
+    tune.portfolioMaxPositions !== undefined &&
+    Number.isFinite(tune.portfolioMaxPositions) &&
+    tune.portfolioMaxPositions !== current.portfolioMaxPositions
+  ) {
+    if (tune.portfolioMaxPositions <= current.portfolioMaxPositions) tighten.portfolioMaxPositions = tune.portfolioMaxPositions;
+    else relax.portfolioMaxPositions = tune.portfolioMaxPositions;
+  }
+  if (tune.gridMaxAllocPct !== undefined && Number.isFinite(tune.gridMaxAllocPct) && tune.gridMaxAllocPct !== current.gridMaxAllocPct) {
+    if (tune.gridMaxAllocPct <= current.gridMaxAllocPct) tighten.gridMaxAllocPct = tune.gridMaxAllocPct;
+    else relax.gridMaxAllocPct = tune.gridMaxAllocPct;
+  }
+
+  return { tighten, relax };
+};
+
+const positionVenue = (pos: Position | null | undefined): 'spot' | 'futures' => (pos?.venue ?? 'spot');
 
 const blacklistAccountSymbol = (symbol: string, reason: string) => {
   const upper = symbol.toUpperCase();
@@ -193,6 +253,203 @@ const extractExecutedAvgPrice = (order: unknown): number | null => {
   if (execQty > 0 && quoteQty > 0) return quoteQty / execQty;
 
   return null;
+};
+
+type ParsedFill = { qty: number; price: number; commission: number | null; commissionAsset: string | null; tradeId: string | null };
+
+const extractOrderId = (order: unknown): string | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  const raw = rec.orderId;
+  if (raw === undefined || raw === null) return null;
+  const str = String(raw);
+  return str && str !== 'undefined' ? str : null;
+};
+
+const extractOrderSide = (order: unknown): 'BUY' | 'SELL' | null => {
+  if (!order || typeof order !== 'object') return null;
+  const rec = order as Record<string, unknown>;
+  const side = String(rec.side ?? '').toUpperCase();
+  return side === 'BUY' || side === 'SELL' ? side : null;
+};
+
+const extractOrderFills = (order: unknown): ParsedFill[] => {
+  if (!order || typeof order !== 'object') return [];
+  const rec = order as Record<string, unknown>;
+  const fillsRaw = rec.fills;
+  if (!Array.isArray(fillsRaw) || !fillsRaw.length) return [];
+  const fills: ParsedFill[] = [];
+  for (const row of fillsRaw) {
+    if (!row || typeof row !== 'object') continue;
+    const f = row as Record<string, unknown>;
+    const qty = numberFromUnknown(f.qty ?? f.quantity) ?? 0;
+    const price = numberFromUnknown(f.price) ?? 0;
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    if (!Number.isFinite(price) || price <= 0) continue;
+    const commission = numberFromUnknown(f.commission);
+    const commissionAsset = typeof f.commissionAsset === 'string' ? f.commissionAsset.toUpperCase() : null;
+    const tradeId = f.tradeId !== undefined && f.tradeId !== null ? String(f.tradeId) : null;
+    fills.push({
+      qty,
+      price,
+      commission: commission !== null && Number.isFinite(commission) && commission >= 0 ? commission : null,
+      commissionAsset: commissionAsset && commissionAsset !== 'UNDEFINED' ? commissionAsset : null,
+      tradeId: tradeId && tradeId !== 'undefined' ? tradeId : null,
+    });
+  }
+  return fills;
+};
+
+const persistOrderFillsSqliteBestEffort = (params: {
+  at: number;
+  symbol: string;
+  module: 'portfolio' | 'grid';
+  order: unknown;
+  side?: 'BUY' | 'SELL';
+  quoteAsset?: string;
+  homeAsset?: string;
+  quoteToHome?: number;
+  feeRate?: number;
+}) => {
+  try {
+    const side = extractOrderSide(params.order) ?? params.side;
+    if (!side) return;
+
+    const orderId = extractOrderId(params.order);
+    const quoteAsset = params.quoteAsset?.toUpperCase();
+    const homeAsset = params.homeAsset?.toUpperCase();
+    const quoteToHome = Number.isFinite(params.quoteToHome) && (params.quoteToHome ?? 0) > 0 ? params.quoteToHome! : null;
+    const feeRate = Number.isFinite(params.feeRate) && (params.feeRate ?? 0) > 0 ? params.feeRate! : null;
+
+    const fills = extractOrderFills(params.order);
+    if (fills.length) {
+      let totalFeesHome = 0;
+      let totalNotional = 0;
+      let fillCount = 0;
+
+      for (const f of fills) {
+        const notional = f.qty * f.price;
+        if (!Number.isFinite(notional) || notional <= 0) continue;
+
+        let feesHome: number | null = null;
+        if (f.commission !== null && f.commissionAsset && homeAsset && f.commissionAsset === homeAsset) {
+          feesHome = f.commission;
+        } else if (f.commission !== null && f.commissionAsset && quoteAsset && quoteToHome && f.commissionAsset === quoteAsset) {
+          feesHome = f.commission * quoteToHome;
+        } else if (feeRate !== null && quoteToHome !== null) {
+          feesHome = notional * feeRate * quoteToHome;
+        }
+
+        totalNotional += notional;
+        totalFeesHome += feesHome ?? 0;
+        fillCount += 1;
+
+        persistTradeFillSqlite({
+          at: params.at,
+          symbol: params.symbol,
+          module: params.module,
+          side,
+          qty: f.qty,
+          price: f.price,
+          notional,
+          feeAsset: f.commissionAsset ?? undefined,
+          feeAmount: f.commission ?? undefined,
+          feesHome: feesHome ?? undefined,
+          quoteAsset,
+          homeAsset,
+          orderId: orderId ?? undefined,
+          tradeId: f.tradeId ?? undefined,
+        });
+      }
+
+      // Risk Governor fee burn telemetry (best-effort; do not depend on DB).
+      recordFeeTelemetryBestEffort({
+        at: params.at,
+        feesHome: Number.isFinite(totalFeesHome) ? totalFeesHome : null,
+        notionalHome: Number.isFinite(totalNotional) ? totalNotional : null,
+        fills: fillCount,
+      });
+
+      return;
+    }
+
+    const executedQty = extractExecutedQty(params.order) ?? 0;
+    if (!Number.isFinite(executedQty) || executedQty <= 0) return;
+    const quoteQty = extractCumulativeQuoteQty(params.order) ?? 0;
+    const avgPrice = extractExecutedAvgPrice(params.order) ?? (quoteQty > 0 ? quoteQty / executedQty : 0);
+    if (!Number.isFinite(avgPrice) || avgPrice <= 0) return;
+    const notional = quoteQty > 0 ? quoteQty : executedQty * avgPrice;
+    if (!Number.isFinite(notional) || notional <= 0) return;
+    const feesHome = feeRate !== null && quoteToHome !== null ? notional * feeRate * quoteToHome : null;
+
+    persistTradeFillSqlite({
+      at: params.at,
+      symbol: params.symbol,
+      module: params.module,
+      side,
+      qty: executedQty,
+      price: avgPrice,
+      notional,
+      feesHome: feesHome ?? undefined,
+      quoteAsset,
+      homeAsset,
+      orderId: orderId ?? undefined,
+    });
+
+    recordFeeTelemetryBestEffort({ at: params.at, feesHome: feesHome ?? null, notionalHome: notional, fills: 1 });
+  } catch {
+    // ignore
+  }
+};
+
+const persistConversionBestEffort = (params: {
+  at: number;
+  order: unknown;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  fromAsset: string;
+  toAsset: string;
+  homeAsset: string;
+}) => {
+  try {
+    const execQty = extractExecutedQty(params.order);
+    const quoteQty = extractCumulativeQuoteQty(params.order);
+    const fromQty = params.side === 'BUY' ? quoteQty : execQty;
+    const toQty = params.side === 'BUY' ? execQty : quoteQty;
+    const from = params.fromAsset.toUpperCase();
+    const to = params.toAsset.toUpperCase();
+    const home = params.homeAsset.toUpperCase();
+
+    const homeNotional = home === from ? fromQty : home === to ? toQty : null;
+    const feeEstHome = homeNotional && homeNotional > 0 ? homeNotional * feeRate.taker : null;
+    const slippageEstHome =
+      homeNotional && homeNotional > 0 ? homeNotional * (Math.max(0, config.slippageBps) / 10_000) : null;
+    const lossEstHome =
+      feeEstHome !== null && slippageEstHome !== null && feeEstHome >= 0 && slippageEstHome >= 0 ? feeEstHome + slippageEstHome : null;
+
+    const orderId =
+      params.order && typeof params.order === 'object' && 'orderId' in params.order
+        ? String((params.order as { orderId?: string | number }).orderId ?? '')
+        : undefined;
+
+    persistConversionEvent({
+      at: params.at,
+      symbol: params.symbol,
+      side: params.side,
+      fromAsset: from,
+      toAsset: to,
+      fromQty: fromQty ?? undefined,
+      toQty: toQty ?? undefined,
+      homeAsset: home,
+      homeNotional: homeNotional ?? undefined,
+      feeEstHome: feeEstHome ?? undefined,
+      slippageEstHome: slippageEstHome ?? undefined,
+      lossEstHome: lossEstHome ?? undefined,
+      orderId: orderId && orderId !== 'undefined' ? orderId : undefined,
+    });
+  } catch {
+    // ignore
+  }
 };
 
 const findSymbolInfo = (symbols: SymbolInfo[], symbol: string) =>
@@ -398,6 +655,7 @@ const updateEquityTelemetry = async () => {
         missingAssets: missingAssets.length ? missingAssets : undefined,
       },
     });
+    persistEquitySnapshot({ at: now, homeAsset: home, equityHome: totalHome, source: config.tradeVenue });
   } catch (error) {
     logger.warn({ err: errorToLogObject(error) }, 'Equity telemetry update failed');
   }
@@ -457,7 +715,8 @@ const ensureQuoteAsset = async (
   try {
     if (conversion.side === 'BUY') {
       const qty = missing * buffer;
-      await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'BUY', fromAsset: home, toAsset: quote, homeAsset: home });
     } else {
       const snap = await get24hStats(conversion.symbol);
       const qtyFrom = snap.price > 0 ? (missing / snap.price) * buffer : 0;
@@ -465,7 +724,8 @@ const ensureQuoteAsset = async (
       if (qtyFrom <= 0 || freeHome <= 0) {
         return { balances, note: `Insufficient ${home} to convert` };
       }
-      await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: Math.min(qtyFrom, freeHome), type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: Math.min(qtyFrom, freeHome), type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'SELL', fromAsset: home, toAsset: quote, homeAsset: home });
     }
     bumpConversionCounter();
     const refreshed = await refreshBalancesFromState();
@@ -499,12 +759,14 @@ const convertToHome = async (
   const buffer = 1 - config.slippageBps / 10000;
   try {
     if (conversion.side === 'SELL') {
-      await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: qtyFrom * buffer, type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'SELL', quantity: qtyFrom * buffer, type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'SELL', fromAsset: from, toAsset: home, homeAsset: home });
     } else {
       const snap = await get24hStats(conversion.symbol);
       const qtyHome = snap.price > 0 ? (qtyFrom / snap.price) * buffer : 0;
       if (qtyHome <= 0) return { balances, note: 'Conversion sizing failed' };
-      await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qtyHome, type: 'MARKET' });
+      const order = await placeOrder({ symbol: conversion.symbol, side: 'BUY', quantity: qtyHome, type: 'MARKET' });
+      persistConversionBestEffort({ at: Date.now(), order, symbol: conversion.symbol, side: 'BUY', fromAsset: from, toAsset: home, homeAsset: home });
     }
     bumpConversionCounter();
     const refreshed = await refreshBalancesFromState();
@@ -718,6 +980,17 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
       const exitAvg = extractExecutedAvgPrice(order) ?? priceForChecks;
       const entryAvg = position.executedAvgPrice ?? position.entryPrice;
       const quoteToHome = quoteAsset ? (await getAssetToHomeRate(symbols, quoteAsset, home)) ?? 1 : 1;
+      persistOrderFillsSqliteBestEffort({
+        at: closedAt,
+        symbol,
+        module: 'portfolio',
+        order,
+        side: position.side === 'BUY' ? 'SELL' : 'BUY',
+        quoteAsset,
+        homeAsset: home,
+        quoteToHome,
+        feeRate: feeRate.taker,
+      });
       const pnlQuote =
         position.side === 'BUY' ? (exitAvg - entryAvg) * adjustedQty : (entryAvg - exitAvg) * adjustedQty;
       const pnlHome = pnlQuote * quoteToHome;
@@ -786,6 +1059,17 @@ const closePosition = async (symbols: SymbolInfo[], positionKey: string, positio
     const exitAvg = extractExecutedAvgPrice(order) ?? priceForChecks;
     const entryAvg = position.executedAvgPrice ?? position.entryPrice;
     const quoteToHome = quoteAsset ? (await getAssetToHomeRate(symbols, quoteAsset, home)) ?? 1 : 1;
+    persistOrderFillsSqliteBestEffort({
+      at: closedAt,
+      symbol,
+      module: 'portfolio',
+      order,
+      side: 'SELL',
+      quoteAsset,
+      homeAsset: home,
+      quoteToHome,
+      feeRate: feeRate.taker,
+    });
     const pnlQuote = position.side === 'BUY' ? (exitAvg - entryAvg) * adjustedQty : (entryAvg - exitAvg) * adjustedQty;
     const pnlHome = pnlQuote * quoteToHome;
     const entryFeeHome = adjustedQty * entryAvg * feeRate.taker * quoteToHome;
@@ -858,8 +1142,8 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
     if (pos.ocoOrderListId) byOrderListId.set(pos.ocoOrderListId, key);
   }
 
-  const allowedSymbolSet = new Set(config.allowedSymbols.map((s) => s.toUpperCase()));
-  const allowedQuoteSet = new Set(config.allowedQuoteAssets.map((s) => s.toUpperCase()));
+  const allowedSymbolSet = new Set(config.tradeUniverse.map((s) => s.toUpperCase()));
+  const allowedQuoteSet = new Set(config.quoteAssets.map((s) => s.toUpperCase()));
   const openOrderListIds = new Set<number>();
 
   for (const oco of openOcos) {
@@ -888,7 +1172,7 @@ const reconcileOcoForPositions = async (symbols: SymbolInfo[]) => {
     const baseAsset = (info?.baseAsset ?? '').toUpperCase();
     if (!quoteAsset || !baseAsset) continue;
 
-    const isAllowed = config.allowedSymbols.length > 0 ? allowedSymbolSet.has(symbol) : allowedQuoteSet.has(quoteAsset);
+    const isAllowed = config.tradeUniverse.length > 0 ? allowedSymbolSet.has(symbol) : allowedQuoteSet.has(quoteAsset);
     if (!isAllowed) continue;
 
     // Try to infer horizon from lastTrades; fallback to short.
@@ -1098,7 +1382,9 @@ const portfolioTick = async (
     }
   }
   const maxAllocHome = (allocBaseHome * config.portfolioMaxAllocPct) / 100;
-  const blockedSymbols = accountBlacklistSet();
+  pruneExpiredAutoBlacklist(now);
+  const isBlockedByPolicy = (s: string) => getSymbolBlockInfo(s, now).blocked;
+  const blockedSymbols = new Set<string>(Object.keys(persisted.meta?.accountBlacklist ?? {}).map((s) => s.toUpperCase()));
   if (config.gridEnabled) {
     for (const grid of Object.values(persisted.grids ?? {})) {
       if (grid?.status === 'running') blockedSymbols.add(grid.symbol.toUpperCase());
@@ -1209,9 +1495,9 @@ const portfolioTick = async (
 
   const ranked = persisted.meta?.rankedCandidates?.map((c) => c.symbol.toUpperCase()) ?? [];
   const universe = forceEntry
-    ? [forceEntry.symbol.toUpperCase()].filter((s) => !blockedSymbols.has(s.toUpperCase()))
+    ? [forceEntry.symbol.toUpperCase()].filter((s) => !blockedSymbols.has(s.toUpperCase()) && !isBlockedByPolicy(s))
     : Array.from(new Set([state.symbol.toUpperCase(), ...ranked]))
-        .filter((s) => !blockedSymbols.has(s.toUpperCase()))
+        .filter((s) => !blockedSymbols.has(s.toUpperCase()) && !isBlockedByPolicy(s))
         .slice(0, 20);
 
   for (const candidate of universe) {
@@ -1307,6 +1593,17 @@ const portfolioTick = async (
     try {
       const order = await placeOrder({ symbol: candidate, side: entry.side, quantity: roundedQty, type: 'MARKET', price });
       persistLastTrade(persisted, key, now);
+      persistOrderFillsSqliteBestEffort({
+        at: now,
+        symbol: candidate,
+        module: 'portfolio',
+        order,
+        side: entry.side,
+        quoteAsset,
+        homeAsset: home,
+        quoteToHome,
+        feeRate: feeRate.taker,
+      });
 
       const executedQty = extractExecutedQty(order) ?? roundedQty;
       const executedAvgPrice = extractExecutedAvgPrice(order) ?? price;
@@ -1638,6 +1935,17 @@ const singleSymbolTick = async (
 
     const order = await placeOrder({ symbol: state.symbol, side: entry.side, quantity: adjustedQty, type: 'MARKET', price });
     persistLastTrade(persisted, key, now);
+    persistOrderFillsSqliteBestEffort({
+      at: now,
+      symbol: state.symbol,
+      module: 'portfolio',
+      order,
+      side: entry.side,
+      quoteAsset,
+      homeAsset: home,
+      quoteToHome,
+      feeRate: feeRate.taker,
+    });
 
     const executedQty = extractExecutedQty(order) ?? adjustedQty;
     const executedAvgPrice = extractExecutedAvgPrice(order) ?? price;
@@ -1763,17 +2071,23 @@ export const autoTradeTick = async (symbol?: string) => {
     return;
   }
 
-  if (config.aiPolicyMode === 'advisory') {
-    const aiDecision = await runAiPolicy(symbol);
-    recordDecision({
-      at: aiDecision?.at ?? Date.now(),
-      symbol: aiDecision?.symbol ?? symbol ?? 'UNKNOWN',
-      horizon: aiDecision?.horizon,
-      action: 'skipped',
-      reason: aiDecision
-        ? `AI policy advisory: ${aiDecision.action}${aiDecision.reason ? ` · ${aiDecision.reason}` : ''}`.slice(0, 200)
-        : 'AI policy advisory: rate-limited',
-    });
+  const governor = getRiskGovernorDecision();
+  const entriesAllowedByGovernor = !(governor?.entriesPaused ?? false);
+  const autonomy = resolveAutonomy(
+    config.aiAutonomyProfile,
+    {
+      aiPolicyAllowRiskRelaxation: config.aiPolicyAllowRiskRelaxation,
+      aiPolicySweepAutoApply: config.aiPolicySweepAutoApply,
+      autoBlacklistEnabled: config.autoBlacklistEnabled,
+      gridEnabled: config.gridEnabled,
+      tradeVenue: config.tradeVenue,
+    },
+    governor?.state ?? null,
+  );
+
+  // If we can't place orders (missing exchange creds / venue disabled), skip AI to avoid wasting tokens.
+  if (!config.binanceApiKey || !config.binanceApiSecret) {
+    recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'Binance API credentials missing' });
     await updateEquityTelemetry();
     return;
   }
@@ -1791,8 +2105,53 @@ export const autoTradeTick = async (symbol?: string) => {
     return;
   }
 
-  const aiDecision = await runAiPolicy(symbol);
-  if (config.aiPolicyMode === 'gated-live' && !aiDecision) {
+  const now = Date.now();
+  const blockedByGovernor = governor?.state === 'HALT';
+  const blockedReason = blockedByGovernor ? `Governor ${governor.state}: entries paused` : null;
+
+  const blockedMode = config.aiPolicyCallWhenBlocked;
+  const lastBlockedMonitorAt = persisted.meta?.aiPolicyBlockedMonitorAt ?? 0;
+  const blockedMonitorDue =
+    blockedByGovernor &&
+    blockedMode === 'hourly' &&
+    (!lastBlockedMonitorAt || now - lastBlockedMonitorAt >= 60 * 60 * 1000);
+
+  const shouldCallAiPolicy = !blockedByGovernor || blockedMode === 'always' || blockedMonitorDue;
+
+  const aiDecisionRaw = shouldCallAiPolicy ? await runAiPolicy(symbol) : null;
+
+  if (blockedByGovernor && blockedMode === 'hourly' && blockedMonitorDue) {
+    persistMeta(persisted, { aiPolicyBlockedMonitorAt: now });
+  }
+
+  const aiDecisionPrepared =
+    blockedByGovernor && aiDecisionRaw
+      ? { ...aiDecisionRaw, action: 'HOLD' as const, reason: blockedReason ?? aiDecisionRaw.reason }
+      : aiDecisionRaw;
+
+  if (config.aiMode === 'advisory') {
+    const aiDecision =
+      aiDecisionPrepared && !entriesAllowedByGovernor && aiDecisionPrepared.action === 'OPEN'
+        ? { ...aiDecisionPrepared, action: 'HOLD' as const, reason: `Governor ${governor?.state ?? 'UNKNOWN'}: entries paused` }
+        : aiDecisionPrepared;
+
+    recordDecision({
+      at: aiDecision?.at ?? now,
+      symbol: aiDecision?.symbol ?? symbol ?? 'UNKNOWN',
+      horizon: aiDecision?.horizon,
+      action: 'skipped',
+      reason: aiDecision
+        ? `AI policy advisory: ${aiDecision.action}${aiDecision.reason ? ` · ${aiDecision.reason}` : ''}`.slice(0, 200)
+        : blockedByGovernor && !shouldCallAiPolicy
+          ? `AI skipped: blocked (${blockedReason ?? 'blocked'})`.slice(0, 200)
+          : 'AI policy advisory: rate-limited',
+    });
+    await updateEquityTelemetry();
+    return;
+  }
+
+  const aiDecision = aiDecisionPrepared;
+  if (config.aiMode === 'gated-live' && !aiDecision) {
     // If AI policy is enabled but rate-limited/unavailable, hold (manage exits, no new entries).
     if (config.gridEnabled) {
       await startOrSyncGrids();
@@ -1811,25 +2170,49 @@ export const autoTradeTick = async (symbol?: string) => {
   }
 
   try {
-    if (config.aiPolicyMode === 'gated-live' && aiDecision) {
-      if (config.aiPolicyTuningAutoApply && aiDecision.tune && Object.keys(aiDecision.tune).length > 0) {
-        const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
-        if (alreadyAppliedAt < aiDecision.at) {
-          const res = applyAiTuning({ tune: { ...aiDecision.tune }, source: 'ai', reason: `ai-policy:${aiDecision.action}` });
-          if (res.ok) {
-            if (res.applied && Object.keys(res.applied).length > 0) {
-              logger.info({ applied: res.applied, notes: res.notes }, 'AI policy applied runtime tuning');
-            }
-          } else {
-            logger.warn({ error: res.error }, 'AI policy tuning apply failed');
-          }
-        }
-      }
+	    if (config.aiMode === 'gated-live' && aiDecision) {
+	      if (
+	        config.aiPolicyTuningAutoApply &&
+	        aiDecision.tune &&
+	        Object.keys(aiDecision.tune).length > 0
+	      ) {
+	        const alreadyAppliedAt = persisted.meta?.runtimeConfig?.updatedAt ?? 0;
+	        if (alreadyAppliedAt < aiDecision.at) {
+	          const picked = pickAiTuningForAutoApply(aiDecision.tune);
+	          const { tighten, relax } = splitTuningByRiskDirection(picked);
+	          const appliedAny: Record<string, unknown> = {};
+	          const notes: string[] = [];
 
-      if (config.aiPolicySweepAutoApply && aiDecision.sweepUnusedToHome && config.tradeVenue === 'spot') {
-        const now = Date.now();
-        const cooldownMs = Math.max(0, config.aiPolicySweepCooldownMinutes) * 60_000;
-        const lastSweepAt = persisted.meta?.aiSweeps?.lastAt ?? 0;
+	          if (autonomy.canAutoApplyTuningTighten && Object.keys(tighten).length > 0) {
+	            const res = applyAiTuning({ tune: { ...tighten }, source: 'ai', reason: `ai-policy:tighten:${aiDecision.action}` });
+	            if (res.ok) {
+	              if (res.applied && Object.keys(res.applied).length > 0) appliedAny.tighten = res.applied;
+	              if (res.notes?.length) notes.push(...res.notes);
+	            } else {
+	              logger.warn({ error: res.error }, 'AI policy tighten tuning apply failed');
+	            }
+	          }
+
+	          if (autonomy.canAutoApplyTuningRelax && Object.keys(relax).length > 0) {
+	            const res = applyAiTuning({ tune: { ...relax }, source: 'ai', reason: `ai-policy:relax:${aiDecision.action}` });
+	            if (res.ok) {
+	              if (res.applied && Object.keys(res.applied).length > 0) appliedAny.relax = res.applied;
+	              if (res.notes?.length) notes.push(...res.notes);
+	            } else {
+	              logger.warn({ error: res.error }, 'AI policy relax tuning apply failed');
+	            }
+	          }
+
+	          if (Object.keys(appliedAny).length > 0) {
+	            logger.info({ applied: appliedAny, notes: notes.length ? notes : undefined }, 'AI policy applied runtime tuning');
+	          }
+	        }
+	      }
+
+	      if (config.aiPolicySweepAutoApply && autonomy.canAutoSweepToHome && aiDecision.sweepUnusedToHome && config.tradeVenue === 'spot') {
+	        const now = Date.now();
+	        const cooldownMs = Math.max(0, config.aiPolicySweepCooldownMinutes) * 60_000;
+	        const lastSweepAt = persisted.meta?.aiSweeps?.lastAt ?? 0;
         if (!lastSweepAt || now - lastSweepAt >= cooldownMs) {
           const res = await sweepUnusedToHome({
             dryRun: false,
@@ -1853,6 +2236,97 @@ export const autoTradeTick = async (symbol?: string) => {
           symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
           action: 'skipped',
           reason: `AI policy PANIC: ${aiDecision.reason}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+	      if (aiDecision.action === 'PAUSE_GRID') {
+	        const target = aiDecision.symbol?.toUpperCase();
+	        if (!target) {
+	          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: missing symbol' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+	        if (!autonomy.canPauseGrid) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy PAUSE_GRID blocked by autonomy profile' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+	
+	        if (!config.gridEnabled) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy PAUSE_GRID ignored: GRID_ENABLED=false' });
+	          await updateEquityTelemetry();
+	          return;
+        }
+
+        const res = await pauseGridBuys(target, { reason: 'ai' });
+        recordDecision({
+          at: aiDecision.at,
+          symbol: target,
+          action: 'skipped',
+          reason: res.ok ? `AI policy PAUSE_GRID: ${aiDecision.reason}`.slice(0, 200) : `AI policy PAUSE_GRID failed: ${res.error}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+	      if (aiDecision.action === 'RESUME_GRID') {
+	        const target = aiDecision.symbol?.toUpperCase();
+	        if (!target) {
+	          recordDecision({ at: aiDecision.at, symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'AI policy RESUME_GRID ignored: missing symbol' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+
+	        // Conservative default: treat RESUME as a risk relaxation. Require autonomy permission (profile + explicit env allow + governor NORMAL).
+	        if (!autonomy.canResumeGrid) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID blocked by autonomy profile / governor / env allow' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+	        if (!config.gridEnabled) {
+	          recordDecision({ at: aiDecision.at, symbol: target, action: 'skipped', reason: 'AI policy RESUME_GRID ignored: GRID_ENABLED=false' });
+	          await updateEquityTelemetry();
+	          return;
+	        }
+
+        const res = await resumeGridBuys(target);
+        recordDecision({
+          at: aiDecision.at,
+          symbol: target,
+          action: 'skipped',
+          reason: res.ok ? `AI policy RESUME_GRID: ${aiDecision.reason}`.slice(0, 200) : `AI policy RESUME_GRID failed: ${res.error}`.slice(0, 200),
+        });
+        await updateEquityTelemetry();
+        return;
+      }
+
+      if (aiDecision.action === 'REDUCE_RISK') {
+        // Tighten-only intent. Entries are disabled for this tick. Optional `tune` may still be applied via existing tuning gate above.
+        if (config.gridEnabled) {
+          await startOrSyncGrids();
+        }
+        if (!config.portfolioEnabled && config.gridEnabled) {
+          recordDecision({
+            at: aiDecision.at,
+            symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
+            action: 'skipped',
+            reason: `AI policy REDUCE_RISK: ${aiDecision.reason}`.slice(0, 200),
+          });
+          await updateEquityTelemetry();
+          return;
+        }
+        if (config.portfolioEnabled) {
+          await portfolioTick(symbol, { entriesAllowed: false });
+        } else {
+          await singleSymbolTick(symbol, { entriesAllowed: false });
+        }
+        recordDecision({
+          at: aiDecision.at,
+          symbol: aiDecision.symbol ?? symbol ?? 'UNKNOWN',
+          action: 'skipped',
+          reason: `AI policy REDUCE_RISK: ${aiDecision.reason}`.slice(0, 200),
         });
         await updateEquityTelemetry();
         return;
@@ -1891,6 +2365,17 @@ export const autoTradeTick = async (symbol?: string) => {
       }
 
       if (aiDecision.action === 'OPEN' && aiDecision.symbol && aiDecision.horizon) {
+        if (!entriesAllowedByGovernor) {
+          recordDecision({
+            at: aiDecision.at,
+            symbol: aiDecision.symbol,
+            horizon: aiDecision.horizon,
+            action: 'skipped',
+            reason: `Governor ${governor?.state ?? 'UNKNOWN'}: entries paused`,
+          });
+          await updateEquityTelemetry();
+          return;
+        }
         if (config.gridEnabled) {
           await startOrSyncGrids();
         }
@@ -1939,6 +2424,28 @@ export const autoTradeTick = async (symbol?: string) => {
       await updateEquityTelemetry();
       return;
     }
+
+    if (!entriesAllowedByGovernor) {
+      // Governor may pause entries while still allowing exit management.
+      const beforeAt = persisted.meta?.lastAutoTrade?.at ?? 0;
+      if (config.portfolioEnabled) {
+        await portfolioTick(symbol, { entriesAllowed: false });
+      } else {
+        await singleSymbolTick(symbol, { entriesAllowed: false });
+      }
+      const afterAt = persisted.meta?.lastAutoTrade?.at ?? 0;
+      if (blockedByGovernor && !shouldCallAiPolicy && afterAt === beforeAt) {
+        recordDecision({
+          at: Date.now(),
+          symbol: symbol ?? 'UNKNOWN',
+          action: 'skipped',
+          reason: `AI skipped: blocked (${blockedReason ?? 'blocked'})`.slice(0, 200),
+        });
+      }
+      await updateEquityTelemetry();
+      return;
+    }
+
     if (config.portfolioEnabled) {
       await portfolioTick(symbol);
     } else {

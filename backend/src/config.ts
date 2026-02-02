@@ -75,6 +75,7 @@ const oneOf = <T extends string>(value: string | undefined, allowed: readonly T[
 export type RuntimeConfigOverrides = Partial<{
   minQuoteVolume: number;
   maxVolatilityPercent: number;
+  riskPerTradeBasisPoints: number;
   autoTradeHorizon: 'short' | 'medium' | 'long';
   portfolioMaxAllocPct: number;
   portfolioMaxPositions: number;
@@ -86,10 +87,43 @@ const clampNumber = (value: number, min: number, max: number) => Math.min(max, M
 const runtimeBounds = {
   minQuoteVolume: { min: 100_000, max: 200_000_000 },
   maxVolatilityPercent: { min: 2, max: 60 },
+  riskPerTradeBasisPoints: { min: 1, max: 200 },
   portfolioMaxAllocPct: { min: 1, max: 95 },
   portfolioMaxPositions: { min: 1, max: 15 },
   gridMaxAllocPct: { min: 0, max: 80 },
 } as const;
+
+const parseRangeFromEnv = (
+  value: string | undefined,
+  fallback: { min: number; max: number },
+  bounds: { min: number; max: number },
+): { min: number; max: number } => {
+  const cleaned = stripInlineComment(value);
+  if (!cleaned) return fallback;
+  const trimmed = cleaned.trim();
+  const match = trimmed.match(/^(\d+(?:\.\d+)?)\s*\.\.\s*(\d+(?:\.\d+)?)$/);
+  if (!match) return fallback;
+  const minRaw = Number(match[1]);
+  const maxRaw = Number(match[2]);
+  if (!Number.isFinite(minRaw) || !Number.isFinite(maxRaw)) return fallback;
+  const min = clampNumber(minRaw, bounds.min, bounds.max);
+  const max = clampNumber(maxRaw, bounds.min, bounds.max);
+  if (min > max) return fallback;
+  return { min, max };
+};
+
+const aiModeFromEnv = () => oneOf(process.env.AI_MODE, ['off', 'advisory', 'gated-live'] as const, 'off');
+
+const isAiEnabledByEnv = () => {
+  const mode = aiModeFromEnv();
+  return mode !== 'off';
+};
+
+const aiModelFromEnv = () => stringFromEnv(process.env.AI_MODEL, 'gpt-4.1-mini');
+const aiPolicyModelFromEnv = () => optionalStringFromEnv(process.env.AI_POLICY_MODEL) || aiModelFromEnv();
+const aiStrategyModelFromEnv = () => optionalStringFromEnv(process.env.AI_STRATEGY_MODEL) || aiModelFromEnv();
+
+export type AiAutonomyProfile = 'safe' | 'standard' | 'pro' | 'aggressive';
 
 export const config = {
   env: stringFromEnv(process.env.NODE_ENV, 'development'),
@@ -106,23 +140,35 @@ export const config = {
     ? 'CROSSED'
     : 'ISOLATED') as 'ISOLATED' | 'CROSSED',
   tradingEnabled: boolFromEnv(process.env.TRADING_ENABLED, false),
-  openAiApiKey: optionalStringFromEnv(process.env.OPENAI_API_KEY),
-  openAiModel: stringFromEnv(process.env.OPENAI_MODEL, 'gpt-4.1-mini'),
-  openAiBaseUrl: optionalStringFromEnv(process.env.OPENAI_BASE_URL),
+
+  // AI (OpenAI-compatible)
+  aiApiKey: optionalStringFromEnv(process.env.AI_API_KEY),
+  aiBaseUrl: optionalStringFromEnv(process.env.AI_BASE_URL),
+  aiModel: aiModelFromEnv(),
+  aiPolicyModel: aiPolicyModelFromEnv(),
+  aiStrategyModel: aiStrategyModelFromEnv(),
+
   defaultSymbol: stringFromEnv(process.env.SYMBOL, 'BTCEUR').toUpperCase(),
   quoteAsset: stringFromEnv(process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
   homeAsset: stringFromEnv(process.env.HOME_ASSET ?? process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
-  allowedSymbols: listFromEnvUpper(process.env.ALLOWED_SYMBOLS, [
-    'BTCEUR',
-    'ETHEUR',
-    'BTCUSDT',
-    'ETHUSDT',
-    'BTCUSDC',
-    'ETHUSDC',
-    'SOLUSDT',
-    'BNBUSDT',
-  ]),
-  allowedQuoteAssets: listFromEnvUpper(process.env.ALLOWED_QUOTES, ['USDT', 'USDC', 'EUR']),
+  // Trade universe (controls candidates + execution gate)
+  tradeUniverse: listFromEnvUpper(process.env.TRADE_UNIVERSE, []),
+
+  // QUOTE_ASSETS supports "AUTO" (resolved at runtime; see strategyService).
+  quoteAssetsMode: ((stripInlineComment(process.env.QUOTE_ASSETS) ?? '').trim().toUpperCase() === 'AUTO'
+    ? 'adaptive'
+    : 'fixed') as 'fixed' | 'adaptive',
+  // NOTE: In AUTO mode, runtime resolution is stored in persisted.meta and exposed via API.
+  // Important: when QUOTE_ASSETS=AUTO, do not treat "AUTO" as a literal asset ticker.
+  quoteAssets:
+    (stripInlineComment(process.env.QUOTE_ASSETS) ?? '').trim().toUpperCase() === 'AUTO'
+      ? []
+      : listFromEnvUpper(process.env.QUOTE_ASSETS, ['USDC', 'EUR']),
+  // EU-safe default: exclude USDT (and any other forbidden quotes) from AUTO resolution and discovery.
+  excludedQuoteAssets: listFromEnvUpper(process.env.EXCLUDED_QUOTE_ASSETS, ['USDT']),
+
+  tradeDenylist: listFromEnvUpper(process.env.TRADE_DENYLIST, []),
+
   universeMaxSymbols: numberFromEnv(process.env.UNIVERSE_MAX_SYMBOLS, 50),
   maxPositionSizeUsdt: numberFromEnv(process.env.MAX_POSITION_SIZE_USDT, 200),
   riskPerTradeBasisPoints: numberFromEnv(process.env.RISK_PER_TRADE_BP, 50),
@@ -130,6 +176,7 @@ export const config = {
   autoSelectSymbol: boolFromEnv(process.env.AUTO_SELECT_SYMBOL, false),
   autoDiscoverSymbols: boolFromEnv(process.env.AUTO_DISCOVER_SYMBOLS, true),
   minQuoteVolume: numberFromEnv(process.env.MIN_QUOTE_VOLUME, 5_000_000),
+  minQuoteVolumeMode: oneOf(process.env.MIN_QUOTE_VOLUME_MODE, ['fixed', 'adaptive'] as const, 'fixed'),
   maxVolatilityPercent: numberFromEnv(process.env.MAX_VOLATILITY_PCT, 18),
   newsFeeds: listFromEnvRaw(
     process.env.NEWS_FEEDS,
@@ -137,7 +184,16 @@ export const config = {
   ),
   newsCacheMinutes: numberFromEnv(process.env.NEWS_CACHE_MINUTES, 15),
   newsWeight: numberFromEnv(process.env.NEWS_WEIGHT, 2),
-  blacklistSymbols: listFromEnvUpper(process.env.BLACKLIST_SYMBOLS, []),
+  autoBlacklistEnabled: boolFromEnv(process.env.AUTO_BLACKLIST_ENABLED, true),
+  autoBlacklistTtlMinutes: Math.max(5, Math.floor(numberFromEnv(process.env.AUTO_BLACKLIST_TTL_MIN, 360))),
+  autoBlacklistTriggers: (() => {
+    const allowed = new Set(['volumeBelowFloor', 'spreadTooHigh', 'volatilitySpike', 'repeatedSlippage']);
+    const raw = listFromEnvRaw(process.env.AUTO_BLACKLIST_TRIGGERS, Array.from(allowed));
+    return raw
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .filter((t) => allowed.has(t));
+  })(),
   persistencePath: stringFromEnv(process.env.PERSISTENCE_PATH, './data/state.json'),
   persistToSqlite: boolFromEnv(process.env.PERSIST_TO_SQLITE, false),
   sqlitePath: stringFromEnv(process.env.SQLITE_PATH, '/app/data/bot.sqlite'),
@@ -171,15 +227,63 @@ export const config = {
   gridBootstrapBasePct: numberFromEnv(process.env.GRID_BOOTSTRAP_BASE_PCT, 50),
   gridBreakoutAction: oneOf(process.env.GRID_BREAKOUT_ACTION, ['none', 'cancel', 'cancel_and_liquidate'] as const, 'cancel'),
   gridBreakoutBufferPct: numberFromEnv(process.env.GRID_BREAKOUT_BUFFER_PCT, 0.5),
-  aiPolicyMode: oneOf(process.env.AI_POLICY_MODE, ['off', 'advisory', 'gated-live'] as const, 'off'),
-  aiPolicyModel: optionalStringFromEnv(process.env.AI_POLICY_MODEL) || optionalStringFromEnv(process.env.OPENAI_MODEL) || 'gpt-4.1-mini',
+  gridBuyPauseOnLiquidityHalt: boolFromEnv(process.env.GRID_BUY_PAUSE_ON_LIQUIDITY_HALT, true),
+  gridLiquidityResumeTicks: Math.max(1, Math.floor(numberFromEnv(process.env.LIQUIDITY_RESUME_TICKS, 3))),
+  gridLiquidityResumeMinutes: Math.max(0, numberFromEnv(process.env.LIQUIDITY_RESUME_MINUTES, 5)),
+
+  // Risk Governor (safe defaults; risk-off bias)
+  riskGovernorEnabled: boolFromEnv(process.env.RISK_GOVERNOR_ENABLED, true),
+  riskWindowMinutes: Math.max(30, Math.floor(numberFromEnv(process.env.RISK_WINDOW_MINUTES, 360))),
+  riskDrawdownCautionPct: Math.max(0, numberFromEnv(process.env.RISK_DRAWDOWN_CAUTION_PCT, 1.0)),
+  riskDrawdownHaltPct: Math.max(0, numberFromEnv(process.env.RISK_DRAWDOWN_HALT_PCT, 2.0)),
+  riskFeeBurnCautionPct: Math.max(0, numberFromEnv(process.env.RISK_FEE_BURN_CAUTION_PCT, 0.2)),
+  riskFeeBurnHaltPct: Math.max(0, numberFromEnv(process.env.RISK_FEE_BURN_HALT_PCT, 0.4)),
+
+  // NOTE: Trend is a per-symbol regime signal (Grid Guard, candidate scoring).
+  // RISK_TREND_GLOBAL_MODE controls whether the risk governor merely *reports* trend info.
+  // It must never pause entries or switch state due to trend alone.
+  riskTrendGlobalMode: oneOf(process.env.RISK_TREND_GLOBAL_MODE, ['off', 'info'] as const, 'off'),
+  riskTrendAdxOn: Math.max(0, numberFromEnv(process.env.RISK_TREND_ADX_ON, 25)),
+  riskTrendAdxOff: Math.max(0, numberFromEnv(process.env.RISK_TREND_ADX_OFF, 18)),
+  riskMinStateSeconds: Math.max(0, Math.floor(numberFromEnv(process.env.RISK_MIN_STATE_SECONDS, 300))),
+  riskHaltMinSeconds: Math.max(0, Math.floor(numberFromEnv(process.env.RISK_HALT_MIN_SECONDS, 600))),
+  riskHaltMarketExit: boolFromEnv(process.env.RISK_HALT_MARKET_EXIT, false),
+  riskHaltCancelAllOrders: boolFromEnv(process.env.RISK_HALT_CANCEL_ALL_ORDERS, false),
+
+  // Grid Guard (per-symbol grid BUY pause/resume in bad regimes; SELLs stay active)
+  gridGuardEnabled: boolFromEnv(process.env.GRID_GUARD_ENABLED, true),
+  gridBreakdownPct: Math.max(0, numberFromEnv(process.env.GRID_BREAKDOWN_PCT, 1.0)),
+  gridBreakdownTicks: Math.max(1, Math.floor(numberFromEnv(process.env.GRID_BREAKDOWN_TICKS, 3))),
+  gridAtrPctMax: Math.max(0, numberFromEnv(process.env.GRID_ATR_PCT_MAX, 6.0)),
+  gridResumeTicks: Math.max(1, Math.floor(numberFromEnv(process.env.GRID_RESUME_TICKS, 3))),
+  gridResumeMinutes: Math.max(0, numberFromEnv(process.env.GRID_RESUME_MINUTES, 5)),
+
+  aiMode: aiModeFromEnv(),
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),
+  aiPolicyCallWhenBlocked: oneOf(process.env.AI_POLICY_CALL_WHEN_BLOCKED, ['never', 'hourly', 'always'] as const, 'never'),
   aiPolicyMaxGridAllocIncreasePctPerDay: numberFromEnv(process.env.AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY, 5),
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),
   aiPolicySweepCooldownMinutes: numberFromEnv(process.env.AI_POLICY_SWEEP_COOLDOWN_MINUTES, 180),
+
+  // AI policy: risk relaxation is opt-in (safe default false).
+  // Used for actions like RESUME_GRID (treat as increasing risk unless explicitly allowed by operator).
+  aiPolicyAllowRiskRelaxation: boolFromEnv(process.env.AI_POLICY_ALLOW_RISK_RELAXATION, false),
+
+  // AI autonomy & slow-loop coach (additive; safe defaults)
+  aiAutonomyProfile: oneOf(process.env.AI_AUTONOMY_PROFILE, ['safe', 'standard', 'pro', 'aggressive'] as const, 'safe') as AiAutonomyProfile,
+  aiCoachEnabled: boolFromEnv(process.env.AI_COACH_ENABLED, isAiEnabledByEnv()),
+  aiCoachIntervalSeconds: Math.max(60, Math.floor(numberFromEnv(process.env.AI_COACH_INTERVAL_SECONDS, 600))),
+  aiCoachMinEquityUsd: Math.max(0, numberFromEnv(process.env.AI_COACH_MIN_EQUITY_USD, 200)),
+  aiTuningEnvelope: {
+    minQuoteVolume: parseRangeFromEnv(process.env.MIN_QUOTE_VOLUME_RANGE, { min: 3_000_000, max: 30_000_000 }, runtimeBounds.minQuoteVolume),
+    maxVolatilityPercent: parseRangeFromEnv(process.env.MAX_VOLATILITY_RANGE, { min: 6, max: 18 }, runtimeBounds.maxVolatilityPercent),
+    riskPerTradeBasisPoints: parseRangeFromEnv(process.env.RISK_BP_RANGE, { min: 10, max: 60 }, runtimeBounds.riskPerTradeBasisPoints),
+    portfolioMaxPositions: parseRangeFromEnv(process.env.PORTFOLIO_MAX_POS_RANGE, { min: 1, max: 4 }, runtimeBounds.portfolioMaxPositions),
+    gridMaxAllocPct: parseRangeFromEnv(process.env.GRID_MAX_ALLOC_RANGE, { min: 10, max: 35 }, runtimeBounds.gridMaxAllocPct),
+  },
   apiRateLimitMax: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_MAX, 120))),
   apiRateLimitWindowSeconds: Math.max(1, Math.floor(numberFromEnv(process.env.API_RATE_LIMIT_WINDOW_SECONDS, 10))),
   apiKey: optionalStringFromEnv(process.env.API_KEY),
@@ -213,6 +317,16 @@ export const applyRuntimeConfigOverrides = (overrides: RuntimeConfigOverrides, o
     );
     if (mutate) config.maxVolatilityPercent = bounded;
     applied.maxVolatilityPercent = bounded;
+  }
+
+  if (overrides.riskPerTradeBasisPoints !== undefined && Number.isFinite(overrides.riskPerTradeBasisPoints)) {
+    const bounded = clampNumber(
+      overrides.riskPerTradeBasisPoints,
+      runtimeBounds.riskPerTradeBasisPoints.min,
+      runtimeBounds.riskPerTradeBasisPoints.max,
+    );
+    if (mutate) config.riskPerTradeBasisPoints = bounded;
+    applied.riskPerTradeBasisPoints = bounded;
   }
 
   if (overrides.autoTradeHorizon !== undefined) {

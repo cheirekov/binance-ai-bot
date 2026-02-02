@@ -2,12 +2,27 @@ import { cancelOrder, get24hStats, getBalances, getKlines, getOpenOrders, getOrd
 import { fetchTradableSymbols } from '../binance/exchangeInfo.js';
 import { config, feeRate } from '../config.js';
 import { logger } from '../logger.js';
+import { fetchIndicatorSnapshot } from '../strategy/indicators.js';
 import { Balance, GridOrder, GridState } from '../types.js';
 import { errorToLogObject, errorToString } from '../utils/errors.js';
 import { getPersistedState, persistGrid, persistMeta } from './persistence.js';
-import { persistGridFill } from './sqlite.js';
+import { recordFeeTelemetryBestEffort } from './riskGovernor.js';
+import { persistGridFill, persistTradeFill } from './sqlite.js';
+import { getSymbolBlockInfo, pruneExpiredAutoBlacklist } from './symbolPolicy.js';
 
 const persisted = getPersistedState();
+
+const liquidityResumeOkTicksBySymbol = new Map<string, number>();
+const LIQUIDITY_BUY_PAUSE_REASON = 'liquidity' as const;
+
+const GOVERNOR_BUY_PAUSE_REASON = 'governor' as const;
+const GRID_GUARD_TREND_REASON = 'trend' as const;
+const GRID_GUARD_BREAKDOWN_REASON = 'breakdown' as const;
+const GRID_GUARD_VOL_SPIKE_REASON = 'vol_spike' as const;
+const AI_BUY_PAUSE_REASON = 'ai' as const;
+
+const gridGuardBreakdownTicksBySymbol = new Map<string, number>();
+const gridGuardResumeOkTicksBySymbol = new Map<string, number>();
 
 type SymbolInfo = Awaited<ReturnType<typeof fetchTradableSymbols>>[number];
 
@@ -267,21 +282,47 @@ const scoreGridCandidate = (snap: Awaited<ReturnType<typeof get24hStats>>, range
   return liquidityScore * range.rangePct * regimeScore;
 };
 
+const getRiskGovernor = () => persisted.meta?.riskGovernor?.decision ?? null;
+
+const computeGridGuardSignals = async (symbol: string) => {
+  // Use 1h as a stable regime timeframe for grids.
+  try {
+    const ind = await fetchIndicatorSnapshot(symbol, '1h', 200);
+    const price = ind.close;
+    const atr = ind.atr14;
+    const adx = ind.adx14;
+    const bb = ind.bb20;
+
+    const atrPct = atr && price > 0 ? (atr / price) * 100 : null;
+
+    return {
+      ok: true as const,
+      adx: adx ?? null,
+      atrPct,
+      bbLower: bb.lower ?? null,
+      bbUpper: bb.upper ?? null,
+    };
+  } catch {
+    return { ok: false as const };
+  }
+};
+
 export const refreshGridCandidates = async () => {
   if (config.tradeVenue !== 'spot') return { best: null as string | null, candidates: [] as { symbol: string; score: number }[] };
   if (!config.gridEnabled) return { best: null as string | null, candidates: [] as { symbol: string; score: number }[] };
 
   const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
+
   const last = persisted.meta?.gridUpdatedAt ?? 0;
   if (now - last < Math.max(30_000, config.gridRebalanceSeconds * 1000)) {
-    const cached = persisted.meta?.rankedGridCandidates ?? [];
+    const cached = (persisted.meta?.rankedGridCandidates ?? []).filter((c) => !isBlocked(c.symbol));
     return { best: cached[0]?.symbol ?? null, candidates: cached };
   }
 
   const symbols = await fetchTradableSymbols();
   const home = config.homeAsset.toUpperCase();
-  const blocked = new Set(config.blacklistSymbols.map((s) => s.toUpperCase()));
-  for (const key of Object.keys(persisted.meta?.accountBlacklist ?? {})) blocked.add(key.toUpperCase());
 
   const universe =
     config.gridSymbols.length > 0
@@ -290,7 +331,7 @@ export const refreshGridCandidates = async () => {
 
   const coarse: { symbol: string; snap: Awaited<ReturnType<typeof get24hStats>> }[] = [];
   for (const sym of universe) {
-    if (blocked.has(sym)) continue;
+    if (isBlocked(sym)) continue;
     const info = findSymbolInfo(symbols, sym);
     if (!info || !isSpotTradable(info)) continue;
     if (info.quoteAsset.toUpperCase() !== home) continue;
@@ -402,6 +443,7 @@ const buildGridState = async (symbol: string, balances: Balance[], symbols: Symb
 
 const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: Balance[], currentPrice: number) => {
   if (!config.tradingEnabled) return { balances, grid };
+  if (grid.buyPaused) return { balances, grid };
   const base = grid.baseAsset.toUpperCase();
   const quote = grid.quoteAsset.toUpperCase();
   const freeBy = balanceFreeMap(balances);
@@ -427,7 +469,25 @@ const ensureBootstrapBase = async (grid: GridState, info: SymbolInfo, balances: 
     const order = await placeOrder({ symbol: grid.symbol, side: 'BUY', quantity: qty, type: 'MARKET' });
     const now = Date.now();
     const fill = extractGridFillRow(grid.symbol, order, now);
-    if (fill) persistGridFill(fill);
+    if (fill) {
+      persistGridFill(fill);
+      persistTradeFill({
+        at: fill.at,
+        symbol: fill.symbol,
+        module: 'grid',
+        side: fill.side as 'BUY' | 'SELL',
+        qty: fill.executedQty,
+        price: fill.price ?? fill.notional / fill.executedQty,
+        notional: fill.notional,
+        feeAsset: undefined,
+        feeAmount: undefined,
+        feesHome: fill.feeEst ?? undefined,
+        quoteAsset: grid.quoteAsset,
+        homeAsset: grid.homeAsset,
+        orderId: fill.orderId,
+      });
+      recordFeeTelemetryBestEffort({ at: fill.at, feesHome: fill.feeEst ?? null, notionalHome: fill.notional ?? null, fills: 1 });
+    }
     const perf = ensurePerformance(grid, now);
     const nextPerf = applyFillToPerformance(perf, order, now);
     grid = { ...grid, performance: nextPerf };
@@ -482,7 +542,25 @@ const liquidateGridBaseToHome = async (
   try {
     const order = await placeOrder({ symbol: grid.symbol, side: 'SELL', quantity: qty, type: 'MARKET' });
     const fill = extractGridFillRow(grid.symbol, order, now);
-    if (fill) persistGridFill(fill);
+    if (fill) {
+      persistGridFill(fill);
+      persistTradeFill({
+        at: fill.at,
+        symbol: fill.symbol,
+        module: 'grid',
+        side: fill.side as 'BUY' | 'SELL',
+        qty: fill.executedQty,
+        price: fill.price ?? fill.notional / fill.executedQty,
+        notional: fill.notional,
+        feeAsset: undefined,
+        feeAmount: undefined,
+        feesHome: fill.feeEst ?? undefined,
+        quoteAsset: grid.quoteAsset,
+        homeAsset: grid.homeAsset,
+        orderId: fill.orderId,
+      });
+      recordFeeTelemetryBestEffort({ at: fill.at, feesHome: fill.feeEst ?? null, notionalHome: fill.notional ?? null, fills: 1 });
+    }
     const nextPerf = applyFillToPerformance(perf, order, now);
     return nextPerf;
   } catch (error) {
@@ -529,6 +607,144 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     }
   }
 
+  const quoteVolume = Math.max(0, snap.quoteVolume ?? 0);
+  const liquidityFloor = Math.max(0, config.minQuoteVolume);
+  const liquidityHalted = quoteVolume < liquidityFloor;
+  const symbolKey = grid.symbol.toUpperCase();
+
+  if (config.gridBuyPauseOnLiquidityHalt) {
+    if (liquidityHalted) {
+      liquidityResumeOkTicksBySymbol.set(symbolKey, 0);
+      if (!grid.buyPaused) {
+        grid = {
+          ...grid,
+          buyPaused: true,
+          buyPauseReason: LIQUIDITY_BUY_PAUSE_REASON,
+          buyPausedAt: now,
+        };
+        persistGrid(persisted, grid.symbol, grid);
+        logger.warn(
+          { symbol: grid.symbol, quoteVolume, floor: liquidityFloor },
+          'Grid buys paused due to liquidity halt',
+        );
+      }
+    } else if (grid.buyPaused && grid.buyPauseReason === LIQUIDITY_BUY_PAUSE_REASON) {
+      const nextStreak = (liquidityResumeOkTicksBySymbol.get(symbolKey) ?? 0) + 1;
+      liquidityResumeOkTicksBySymbol.set(symbolKey, nextStreak);
+
+      const minElapsedMs = Math.max(0, config.gridLiquidityResumeMinutes) * 60_000;
+      const pausedAt = grid.buyPausedAt ?? now;
+      const elapsedOk = now - pausedAt >= minElapsedMs;
+      const requiredTicks = Math.max(1, Math.floor(config.gridLiquidityResumeTicks));
+
+      if (elapsedOk && nextStreak >= requiredTicks) {
+        grid = {
+          ...grid,
+          buyPaused: false,
+          buyPauseReason: undefined,
+          buyPausedAt: undefined,
+        };
+        liquidityResumeOkTicksBySymbol.delete(symbolKey);
+        persistGrid(persisted, grid.symbol, grid);
+        logger.info(
+          { symbol: grid.symbol, quoteVolume, floor: liquidityFloor },
+          'Grid buys resumed after liquidity recovery',
+        );
+      }
+    } else {
+      liquidityResumeOkTicksBySymbol.delete(symbolKey);
+    }
+  }
+
+  // Risk Governor global grid BUY pause (safe: cancel BUYs only; keep SELLs to unwind).
+  const governor = getRiskGovernor();
+  const globalBuyPaused = governor?.gridBuyPausedGlobal === true;
+
+  if (globalBuyPaused) {
+    gridGuardResumeOkTicksBySymbol.set(symbolKey, 0);
+    gridGuardBreakdownTicksBySymbol.set(symbolKey, 0);
+    if (!grid.buyPaused || grid.buyPauseReason !== GOVERNOR_BUY_PAUSE_REASON) {
+      grid = { ...grid, buyPaused: true, buyPauseReason: GOVERNOR_BUY_PAUSE_REASON, buyPausedAt: now };
+      persistGrid(persisted, grid.symbol, grid);
+      logger.warn({ symbol: grid.symbol, state: governor?.state }, 'Grid buys paused by Risk Governor');
+    }
+  } else if (grid.buyPaused && grid.buyPauseReason === GOVERNOR_BUY_PAUSE_REASON) {
+    // Governor has released the global pause; allow normal grid guard logic to decide.
+    grid = { ...grid, buyPaused: false, buyPauseReason: undefined, buyPausedAt: undefined };
+    persistGrid(persisted, grid.symbol, grid);
+    logger.info({ symbol: grid.symbol }, 'Grid buys resumed after Risk Governor release');
+  }
+
+  // Grid Guard: pause BUY legs in trend/falling-knife/vol spike regimes (SELLs stay active).
+  if (config.gridGuardEnabled && !globalBuyPaused) {
+    const guard = await computeGridGuardSignals(grid.symbol);
+    const adx = guard.ok ? (guard.adx ?? null) : null;
+    const atrPct = guard.ok ? (guard.atrPct ?? null) : null;
+    const bbLower = guard.ok ? (guard.bbLower ?? null) : null;
+    const bbUpper = guard.ok ? (guard.bbUpper ?? null) : null;
+
+    const adxOn = Math.max(0, config.riskTrendAdxOn);
+    const adxOff = Math.max(0, config.riskTrendAdxOff);
+
+    const trendBad = adx !== null && Number.isFinite(adx) && adx >= adxOn;
+    const atrMax = Math.max(0, config.gridAtrPctMax);
+    // Optional: only enforce ATR% cap if configured > 0
+    const volBad = atrMax > 0 && atrPct !== null && Number.isFinite(atrPct) && atrPct >= atrMax;
+
+    const breakdownFloor =
+      bbLower !== null && Number.isFinite(bbLower) && bbLower > 0
+        ? bbLower * (1 - Math.max(0, config.gridBreakdownPct) / 100)
+        : null;
+    const isBreakdownTick = breakdownFloor !== null && current < breakdownFloor;
+
+    const breakdownStreak = isBreakdownTick ? (gridGuardBreakdownTicksBySymbol.get(symbolKey) ?? 0) + 1 : 0;
+    gridGuardBreakdownTicksBySymbol.set(symbolKey, breakdownStreak);
+
+    const breakdownBad = breakdownStreak >= Math.max(1, Math.floor(config.gridBreakdownTicks));
+
+    const badReason = trendBad
+      ? GRID_GUARD_TREND_REASON
+      : breakdownBad
+        ? GRID_GUARD_BREAKDOWN_REASON
+        : volBad
+          ? GRID_GUARD_VOL_SPIKE_REASON
+          : null;
+
+    if (badReason && grid.buyPauseReason !== LIQUIDITY_BUY_PAUSE_REASON) {
+      gridGuardResumeOkTicksBySymbol.set(symbolKey, 0);
+      if (!grid.buyPaused || grid.buyPauseReason !== badReason) {
+        grid = { ...grid, buyPaused: true, buyPauseReason: badReason, buyPausedAt: now };
+        persistGrid(persisted, grid.symbol, grid);
+        logger.warn({ symbol: grid.symbol, reason: badReason, adx, atrPct, bbLower }, 'Grid Guard paused BUYs');
+      }
+    } else if (
+      grid.buyPaused &&
+      (grid.buyPauseReason === GRID_GUARD_TREND_REASON ||
+        grid.buyPauseReason === GRID_GUARD_BREAKDOWN_REASON ||
+        grid.buyPauseReason === GRID_GUARD_VOL_SPIKE_REASON)
+    ) {
+      const minElapsedMs = Math.max(0, config.gridResumeMinutes) * 60_000;
+      const pausedAt = grid.buyPausedAt ?? now;
+      const elapsedOk = now - pausedAt >= minElapsedMs;
+
+      const reenteredBand =
+        bbLower !== null && bbUpper !== null && Number.isFinite(bbLower) && Number.isFinite(bbUpper) ? current >= bbLower && current <= bbUpper : false;
+      const trendCleared = adx !== null && Number.isFinite(adx) ? adx <= adxOff : false;
+
+      const resumeOk = reenteredBand && trendCleared && !volBad;
+      const nextResumeStreak = resumeOk ? (gridGuardResumeOkTicksBySymbol.get(symbolKey) ?? 0) + 1 : 0;
+      gridGuardResumeOkTicksBySymbol.set(symbolKey, nextResumeStreak);
+
+      if (elapsedOk && nextResumeStreak >= Math.max(1, Math.floor(config.gridResumeTicks))) {
+        grid = { ...grid, buyPaused: false, buyPauseReason: undefined, buyPausedAt: undefined };
+        gridGuardResumeOkTicksBySymbol.delete(symbolKey);
+        gridGuardBreakdownTicksBySymbol.delete(symbolKey);
+        persistGrid(persisted, grid.symbol, grid);
+        logger.info({ symbol: grid.symbol }, 'Grid Guard resumed BUYs');
+      }
+    }
+  }
+
   // Bootstrap base inventory for neutral grids.
   const boot = await ensureBootstrapBase(grid, info, balances, current);
   balances = boot.balances;
@@ -543,6 +759,8 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   const openOrders = await getOpenOrders(grid.symbol);
   const openById = new Set<number>();
   const openBySideAndPrice = new Map<string, { orderId: number; qty: number }>();
+  const openBuyOrderIds: number[] = [];
+  const buyPaused = grid.buyPaused === true;
   for (const row of openOrders) {
     if (!row || typeof row !== 'object') continue;
     const rec = row as Record<string, unknown>;
@@ -552,9 +770,26 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     const origQty = Number(rec.origQty ?? rec.quantity ?? 0);
     if (!Number.isFinite(orderId) || orderId <= 0) continue;
     if (!Number.isFinite(price) || price <= 0) continue;
+    if (buyPaused && side === 'BUY') {
+      openBuyOrderIds.push(orderId);
+      continue;
+    }
     openById.add(orderId);
     const key = `${side}:${price.toFixed(decimalsForStep(info.tickSize))}`;
     openBySideAndPrice.set(key, { orderId, qty: origQty });
+  }
+
+  if (buyPaused && openBuyOrderIds.length && config.tradingEnabled) {
+    for (const orderId of openBuyOrderIds) {
+      try {
+        await cancelOrder(grid.symbol, orderId);
+      } catch (error) {
+        logger.warn(
+          { err: errorToLogObject(error), symbol: grid.symbol, orderId },
+          'Cancel open BUY order failed (grid buy-pause)',
+        );
+      }
+    }
   }
 
   // Drop stale orders we no longer see as open.
@@ -580,7 +815,24 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
       const detail = await getOrder(grid.symbol, order.orderId);
       perf = applyFillToPerformance(perf, detail, now);
       const fill = extractGridFillRow(grid.symbol, detail, now);
-      if (fill) persistGridFill(fill);
+      if (fill) {
+        persistGridFill(fill);
+        persistTradeFill({
+          at: fill.at,
+          symbol: fill.symbol,
+          module: 'grid',
+          side: fill.side as 'BUY' | 'SELL',
+          qty: fill.executedQty,
+          price: fill.price ?? fill.notional / fill.executedQty,
+          notional: fill.notional,
+          feeAsset: undefined,
+          feeAmount: undefined,
+          feesHome: fill.feeEst ?? undefined,
+          quoteAsset: grid.quoteAsset,
+          homeAsset: grid.homeAsset,
+          orderId: fill.orderId,
+        });
+      }
     } catch (error) {
       logger.warn({ err: errorToLogObject(error), symbol: grid.symbol, orderId: order.orderId }, 'Grid fill reconcile failed');
     }
@@ -611,6 +863,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
 
     const side: 'BUY' | 'SELL' = levelPrice < current ? 'BUY' : 'SELL';
     const levelKey = String(i);
+    if (side === 'BUY' && grid.buyPaused) continue;
 
     // If we already track an open order for this level and it matches, keep it.
     const existing = nextOrdersByLevel[levelKey];
@@ -695,11 +948,102 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
   return updated;
 };
 
+export const pauseGridBuys = async (symbolInput: string, params?: { reason?: string }) => {
+  if (config.tradeVenue !== 'spot') return { ok: false as const, error: 'Grid is only available in spot mode.' };
+  if (!config.gridEnabled) return { ok: false as const, error: 'GRID_ENABLED=false' };
+
+  const symbol = symbolInput.toUpperCase();
+  const existing = persisted.grids?.[symbol];
+  if (!existing || existing.status !== 'running') {
+    return { ok: false as const, error: `No running grid for ${symbol}` };
+  }
+
+  const now = Date.now();
+  const reason = (params?.reason ?? AI_BUY_PAUSE_REASON).slice(0, 40) || AI_BUY_PAUSE_REASON;
+
+  const next: GridState = {
+    ...existing,
+    buyPaused: true,
+    buyPauseReason: reason,
+    buyPausedAt: now,
+    updatedAt: now,
+  };
+  persistGrid(persisted, symbol, next);
+
+  // Safe: cancel BUY orders only; keep SELLs active to unwind.
+  if (config.tradingEnabled) {
+    try {
+      const openOrders = await getOpenOrders(symbol);
+      const buyIds = openOrders
+        .map((o) => (o && typeof o === 'object' ? Number((o as Record<string, unknown>).orderId) : 0))
+        .filter((id) => Number.isFinite(id) && id > 0);
+
+      for (const row of openOrders) {
+        if (!row || typeof row !== 'object') continue;
+        const rec = row as Record<string, unknown>;
+        const side = String(rec.side ?? '').toUpperCase();
+        if (side !== 'BUY') continue;
+        const orderId = Number(rec.orderId);
+        if (!Number.isFinite(orderId) || orderId <= 0) continue;
+        try {
+          await cancelOrder(symbol, orderId);
+        } catch (error) {
+          logger.warn({ err: errorToLogObject(error), symbol, orderId }, 'Cancel open BUY order failed (ai pause)');
+        }
+      }
+
+      // Keep local counters stable (avoid resume thrash on next tick).
+      const key = symbol.toUpperCase();
+      liquidityResumeOkTicksBySymbol.set(key, 0);
+      gridGuardResumeOkTicksBySymbol.set(key, 0);
+      gridGuardBreakdownTicksBySymbol.set(key, 0);
+
+      void buyIds; // keep for debugging if needed (no logging of sensitive data)
+    } catch {
+      // ignore
+    }
+  }
+
+  return { ok: true as const };
+};
+
+export const resumeGridBuys = async (symbolInput: string) => {
+  if (config.tradeVenue !== 'spot') return { ok: false as const, error: 'Grid is only available in spot mode.' };
+  if (!config.gridEnabled) return { ok: false as const, error: 'GRID_ENABLED=false' };
+
+  const symbol = symbolInput.toUpperCase();
+  const existing = persisted.grids?.[symbol];
+  if (!existing || existing.status !== 'running') {
+    return { ok: false as const, error: `No running grid for ${symbol}` };
+  }
+
+  // Conservative: only resume if the pause was explicitly initiated by AI.
+  if (!existing.buyPaused || existing.buyPauseReason !== AI_BUY_PAUSE_REASON) {
+    return { ok: false as const, error: `Grid not paused by AI (${existing.buyPauseReason ?? 'none'})` };
+  }
+
+  const now = Date.now();
+  const next: GridState = {
+    ...existing,
+    buyPaused: false,
+    buyPauseReason: undefined,
+    buyPausedAt: undefined,
+    updatedAt: now,
+  };
+  persistGrid(persisted, symbol, next);
+  return { ok: true as const };
+};
+
 export const startOrSyncGrids = async () => {
   if (!config.gridEnabled) return;
   if (config.tradeVenue !== 'spot') return;
 
+  const governor = getRiskGovernor();
+  const allowNewGrids = governor?.state === undefined || governor?.state === 'NORMAL';
+
   const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
   const last = persisted.meta?.gridRebalanceAt ?? 0;
   if (now - last < config.gridRebalanceSeconds * 1000) return;
 
@@ -736,7 +1080,7 @@ export const startOrSyncGrids = async () => {
 
   // Ensure we have at most GRID_MAX_ACTIVE_GRIDS running grids.
   const runningSymbols = new Set(existing.map((g) => g.symbol.toUpperCase()));
-  const toStart = desiredSymbols.filter((s) => !runningSymbols.has(s) && !stoppedSymbols.has(s));
+  const toStart = allowNewGrids ? desiredSymbols.filter((s) => !runningSymbols.has(s) && !stoppedSymbols.has(s) && !isBlocked(s)) : [];
 
   const allocated = existing.reduce((sum, g) => sum + (g.allocationHome ?? 0), 0);
   const remaining = Math.max(0, maxAllocHome - allocated);
@@ -797,6 +1141,11 @@ export const startGrid = async (symbolInput: string) => {
   if (!config.gridEnabled) return { ok: false, error: 'GRID_ENABLED=false (enable grid mode in .env)' };
 
   const symbol = symbolInput.toUpperCase();
+  pruneExpiredAutoBlacklist(Date.now());
+  const block = getSymbolBlockInfo(symbol);
+  if (block.blocked) {
+    return { ok: false, error: `Symbol ${symbol} blocked: ${block.reason}` };
+  }
   const existing = persisted.grids?.[symbol];
   if (existing?.status === 'running') return { ok: true };
 
@@ -859,3 +1208,7 @@ export const stopGrid = async (symbolInput: string) => {
   persistGrid(persisted, symbol, stopped);
   return { ok: true };
 };
+
+export const __test__ = {
+  reconcileGridOrders,
+} as const;

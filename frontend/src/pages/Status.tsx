@@ -97,6 +97,12 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
   const tradeHalted = !!props.data?.tradeHalted;
   const venue = props.data?.tradeVenue ?? 'spot';
   const quoteAsset = (props.data?.market?.quoteAsset ?? props.data?.quoteAsset)?.toUpperCase() ?? '';
+  const governor = props.data?.riskGovernor ?? null;
+  const autonomy = props.data?.aiAutonomy ?? null;
+  const coachLatest = props.data?.aiCoach?.latest ?? null;
+  const coachEnabled = props.data?.aiCoach?.enabled ?? false;
+  const universe = props.data?.universe ?? null;
+  const aiMode = props.data?.aiMode ?? props.data?.aiPolicyMode ?? 'off';
 
   const expectedTyped = useMemo(() => {
     if (!manualSide) return null;
@@ -195,13 +201,41 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
             <Chip tone={tradingEnabled ? 'danger' : 'good'} title={tradingEnabled ? 'Real orders can be placed' : 'Orders are simulated unless trading is enabled'}>
               {tradingEnabled ? 'LIVE' : 'SIM'}
             </Chip>
-            <Chip tone={autoTradeEnabled ? (emergencyStop ? 'warn' : 'good') : 'neutral'}>Auto-trade: {autoTradeEnabled ? (emergencyStop ? 'Paused' : 'On') : 'Off'}</Chip>
-            <Chip tone={tradeHalted ? 'warn' : 'neutral'}>Halted: {tradeHalted ? 'Yes' : 'No'}</Chip>
-            <Chip tone={emergencyStop ? 'warn' : 'neutral'}>E‑Stop: {emergencyStop ? 'On' : 'Off'}</Chip>
-            <Chip tone={props.data?.gridEnabled ? 'good' : 'neutral'}>Grid: {props.data?.gridEnabled ? 'On' : 'Off'}</Chip>
-            <Chip tone={props.data?.portfolioEnabled ? 'good' : 'neutral'}>Portfolio: {props.data?.portfolioEnabled ? 'On' : 'Off'}</Chip>
-            <Chip tone={props.data?.conversionEnabled ? 'good' : 'neutral'}>Convert: {props.data?.conversionEnabled ? 'On' : 'Off'}</Chip>
-            <Chip tone={props.data?.aiPolicyMode && props.data.aiPolicyMode !== 'off' ? 'good' : 'neutral'}>AI: {props.data?.aiPolicyMode ?? 'off'}</Chip>
+            <Chip
+              tone={autoTradeEnabled ? (emergencyStop ? 'warn' : 'good') : 'neutral'}
+              title={autoTradeEnabled ? (emergencyStop ? 'Auto-trade is paused by emergency stop' : 'Auto-trade is enabled') : 'Auto-trade is disabled'}
+            >
+              Auto-trade: {autoTradeEnabled ? (emergencyStop ? 'Paused' : 'On') : 'Off'}
+            </Chip>
+            <Chip tone={tradeHalted ? 'warn' : 'neutral'} title={tradeHalted ? (riskFlags.length ? riskFlags.join(' • ') : 'Trading halted by risk flags') : 'No symbol-level risk halt'}>
+              Halted: {tradeHalted ? 'Yes' : 'No'}
+            </Chip>
+            <Chip tone={emergencyStop ? 'warn' : 'neutral'} title={emergencyStop ? (props.data?.emergencyStopReason ? `Reason: ${props.data.emergencyStopReason}` : 'Emergency stop enabled') : 'Emergency stop disabled'}>
+              E‑Stop: {emergencyStop ? 'On' : 'Off'}
+            </Chip>
+            <Chip tone={props.data?.gridEnabled ? 'good' : 'neutral'} title={props.data?.gridEnabled ? 'Grid trader enabled (spot-only). BUY legs may still be paused by risk controls.' : 'Grid trader disabled'}>
+              Grid: {props.data?.gridEnabled ? 'On' : 'Off'}
+            </Chip>
+            <Chip tone={props.data?.portfolioEnabled ? 'good' : 'neutral'} title={props.data?.portfolioEnabled ? 'Portfolio mode enabled (multi-symbol) ' : 'Portfolio mode disabled'}>
+              Portfolio: {props.data?.portfolioEnabled ? 'On' : 'Off'}
+            </Chip>
+            <Chip tone={props.data?.conversionEnabled ? 'good' : 'neutral'} title={props.data?.conversionEnabled ? 'Auto-conversion enabled (spot-only)' : 'Auto-conversion disabled'}>
+              Convert: {props.data?.conversionEnabled ? 'On' : 'Off'}
+            </Chip>
+            <Chip
+              tone={aiMode === 'gated-live' ? 'good' : aiMode === 'advisory' ? 'info' : 'neutral'}
+              title={aiMode === 'gated-live' ? 'AI gated-live: AI proposes actions; engine executes only if all safety gates pass.' : aiMode === 'advisory' ? 'AI advisory: AI suggestions only.' : 'AI off.'}
+            >
+              AI Mode: {aiMode}
+            </Chip>
+            {autonomy ? (
+              <Chip
+                tone={autonomy.profile === 'aggressive' ? 'danger' : autonomy.profile === 'pro' ? 'warn' : autonomy.profile === 'standard' ? 'info' : 'good'}
+                title={`AI autonomy profile: ${autonomy.profile}`}
+              >
+                Autonomy: {autonomy.profile}
+              </Chip>
+            ) : null}
           </div>
           <div className="actions">
             <button className="btn ghost" onClick={() => void onToggleEmergencyStop()} type="button">
@@ -223,10 +257,77 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
           ) : (
             <p className="muted">No risk flags reported.</p>
           )}
+
+          <div className="divider" />
+          <div className="label">Config summary (no secrets)</div>
+          <div className="kv-grid">
+            <div className="kv">
+              <div className="label">Universe</div>
+              <div className="value">
+                {universe ? (universe.mode === 'static' ? 'static' : 'auto-discovery') : '—'}
+              </div>
+              <div className="muted">
+                {universe?.tradeUniverse?.length ? `${universe.tradeUniverse.length} symbols` : universe ? 'TRADE_UNIVERSE empty' : ''}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="label">Quote assets</div>
+              <div className="value">{universe?.quoteAssets?.length ? universe.quoteAssets.join(', ') : '—'}</div>
+            </div>
+            <div className="kv">
+              <div className="label">AI model</div>
+              <div className="value">{props.data?.aiModel ?? '—'}</div>
+              <div className="muted">
+                {props.data?.aiPolicyModel || props.data?.aiStrategyModel
+                  ? `policy ${props.data?.aiPolicyModel || 'default'} · strategy ${props.data?.aiStrategyModel || 'default'}`
+                  : ''}
+              </div>
+            </div>
+          </div>
         </Card>
       </div>
 
       <div className="grid grid-2">
+        <Card
+          eyebrow="Risk Governor"
+          title={governor?.state ?? '—'}
+          subtitle={governor?.since ? `Since ${formatDateTimeShort(governor.since)} (${formatAgo(governor.since)})` : '—'}
+        >
+          {governor ? (
+            <>
+              <div className="chip-row">
+                <Chip tone={governor.state === 'HALT' ? 'danger' : governor.state === 'CAUTION' ? 'warn' : 'good'}>
+                  State: {governor.state}
+                </Chip>
+                <Chip tone={governor.entriesPaused ? 'warn' : 'neutral'}>Entries: {governor.entriesPaused ? 'Paused' : 'Allowed'}</Chip>
+                <Chip tone={governor.gridBuyPausedGlobal ? 'warn' : 'neutral'}>
+                  Grid buys: {governor.gridBuyPausedGlobal ? 'Paused' : 'Allowed'}
+                </Chip>
+              </div>
+
+              {governor.reasons?.length ? (
+                <>
+                  <div className="divider" />
+                  <div className="label">Top reasons</div>
+                  <ul className="bullets">
+                    {governor.reasons.slice(0, 4).map((r, idx) => (
+                      <li key={`${r.code}:${idx}`}>
+                        <span className="mono">{r.code}</span>
+                        {r.detail ? ` · ${r.detail}` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="muted">No reasons reported.</p>
+              )}
+            </>
+          ) : (
+            <p className="muted">Governor status unavailable (backend may be older or not initialized yet).</p>
+          )}
+          <p className="muted">Governor decisions are computed from live balances + tickers and in-memory state (not SQLite).</p>
+        </Card>
+
         <Card eyebrow="Risk & limits" title="What constrains the bot">
           <div className="kv-grid">
             <div className="kv">
@@ -248,6 +349,141 @@ export const StatusPage = (props: { data: StrategyResponse | null; selectedSymbo
             </div>
           </div>
           <p className="muted">Some limits (daily loss cap, max positions) are enforced by the backend and may not be fully reported to the UI.</p>
+        </Card>
+
+        <Card
+          eyebrow="AI Coach"
+          title={coachEnabled ? 'Enabled' : 'Disabled'}
+          subtitle={
+            props.data?.aiCoach
+              ? `Interval ${Math.round(props.data.aiCoach.intervalSeconds / 60)}m · Min equity $${props.data.aiCoach.minEquityUsd}`
+              : '—'
+          }
+        >
+          <div className="chip-row">
+            <Chip tone={coachLatest?.skipped ? 'warn' : coachLatest ? 'good' : 'neutral'} title={coachLatest?.skipReason ?? undefined}>
+              Last run: {coachLatest?.at ? formatAgo(coachLatest.at) : '—'}
+            </Chip>
+            <Chip tone="info" title="Coach self-reported confidence (0..1)">
+              Confidence: {coachLatest ? `${Math.round((coachLatest.confidence ?? 0) * 100)}%` : '—'}
+            </Chip>
+            <Chip tone={coachLatest?.proposals?.some((p) => p.applied.applied) ? 'good' : 'neutral'}>
+              Applied: {coachLatest ? coachLatest.proposals.filter((p) => p.applied.applied).length : 0}
+            </Chip>
+            <Chip tone={universe?.autoBlacklist?.length ? 'warn' : 'neutral'} title="Active auto-blacklists hide symbols from the trade universe">
+              Auto-blacklist: {universe?.autoBlacklist?.length ?? 0}
+            </Chip>
+          </div>
+
+          <details className="details">
+            <summary>Coach proposals</summary>
+            {!coachLatest ? <p className="muted">No coach output yet.</p> : null}
+            {coachLatest?.skipped ? (
+              <>
+                <p className="muted">{coachLatest.skipReason ?? 'Coach skipped.'}</p>
+                {coachLatest.notes?.length ? (
+                  <>
+                    <div className="label">Notes</div>
+                    <ul className="bullets">
+                      {coachLatest.notes.slice(0, 8).map((n, idx) => (
+                        <li key={`${idx}`}>{n}</li>
+                      ))}
+                    </ul>
+                  </>
+                ) : null}
+              </>
+            ) : null}
+
+            {coachLatest && !coachLatest.skipped ? (
+              <>
+                {coachLatest.notes?.length ? (
+                  <>
+                    <div className="label">Notes</div>
+                    <ul className="bullets">
+                      {coachLatest.notes.slice(0, 8).map((n, idx) => (
+                        <li key={`${idx}`}>{n}</li>
+                      ))}
+                    </ul>
+                  </>
+                ) : null}
+
+                {coachLatest.proposals?.length ? (
+                  <>
+                    <div className="divider" />
+                    <div className="label">Proposals</div>
+                    <ul className="bullets">
+                      {coachLatest.proposals.slice(0, 12).map((rec, idx) => {
+                        const p = rec.proposal;
+                        const applied = rec.applied.applied;
+                        const ok = rec.applied.ok !== false;
+                        const status = applied ? (ok ? 'applied' : 'apply_failed') : 'suggested';
+                        const statusText = status === 'applied' ? 'Applied' : status === 'apply_failed' ? 'Apply failed' : 'Suggested';
+
+                        const summarize = () => {
+                          if (p.type === 'GRID_ACTION') return `${p.action} · ${p.symbol}`;
+                          if (p.type === 'SYMBOL_POLICY') {
+                            const bans = p.blacklistAdd?.map((b) => b.symbol.toUpperCase()).slice(0, 6) ?? [];
+                            return bans.length ? `Blacklist: ${bans.join(', ')}${(p.blacklistAdd?.length ?? 0) > bans.length ? '…' : ''}` : 'Symbol policy';
+                          }
+                          const entries = Object.entries(p.changes ?? {}).filter(([, v]) => typeof v === 'number' && Number.isFinite(v));
+                          const parts = entries.map(([k, v]) => `${k}=${typeof v === 'number' ? v : ''}`).slice(0, 6);
+                          return parts.length ? parts.join(' · ') : 'Tuning update';
+                        };
+
+                        return (
+                          <li key={`${p.type}:${idx}`}>
+                            <span className="mono">{p.type}</span>
+                            {` · ${summarize()} · ${statusText}`}
+                            <div className="muted">{'reason' in p && p.reason ? p.reason : ''}</div>
+                            {rec.applied.error ? <div className="muted">Apply: {rec.applied.error}</div> : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
+                ) : (
+                  <p className="muted">No proposals.</p>
+                )}
+              </>
+            ) : null}
+          </details>
+
+          <details className="details">
+            <summary>Autonomy capabilities</summary>
+            {!autonomy ? <p className="muted">Autonomy data unavailable (backend may be older).</p> : null}
+            {autonomy ? (
+              <ul className="bullets">
+                {Object.entries(autonomy.capabilities).map(([k, v]) => (
+                  <li key={k}>
+                    <span className="mono">{k}</span> {v ? '✓' : '—'}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </details>
+
+          {universe ? (
+            <p className="muted">
+              Universe: {universe.mode === 'static' ? 'static (TRADE_UNIVERSE)' : 'auto-discovery'}
+              {universe.tradeUniverse?.length ? ` · ${universe.tradeUniverse.length} symbols` : ''}
+              {universe.quoteAssets?.length ? ` · quotes ${universe.quoteAssets.join(', ')}` : ''}
+            </p>
+          ) : null}
+
+          {universe?.autoBlacklist?.length ? (
+            <details className="details">
+              <summary>Active auto-blacklists</summary>
+              <ul className="bullets">
+                {universe.autoBlacklist.slice(0, 30).map((b) => (
+                  <li key={b.symbol}>
+                    <span className="mono">{b.symbol}</span>
+                    {b.reason ? ` · ${b.reason}` : ''}
+                    {b.bannedUntil ? ` · until ${formatDateTimeShort(b.bannedUntil)}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
         </Card>
 
         <Card eyebrow="Danger zone" title="High impact actions" subtitle="Collapsed by default; always confirm">

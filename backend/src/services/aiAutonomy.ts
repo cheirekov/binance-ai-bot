@@ -1,0 +1,64 @@
+import { AiAutonomyProfile } from '../config.js';
+import { AiAutonomyCapabilities, RiskGovernorState } from '../types.js';
+
+export const resolveAutonomy = (
+  profile: AiAutonomyProfile,
+  envFlags: {
+    aiPolicyAllowRiskRelaxation: boolean;
+    aiPolicySweepAutoApply: boolean;
+    autoBlacklistEnabled: boolean;
+    gridEnabled: boolean;
+    tradeVenue: 'spot' | 'futures';
+  },
+  governorState: RiskGovernorState | null | undefined,
+): AiAutonomyCapabilities => {
+  const governorNormal = governorState === 'NORMAL';
+  const allowRiskRelaxation = envFlags.aiPolicyAllowRiskRelaxation && governorNormal;
+
+  // Capability flags are for UI/exposed autonomy. Execution still enforces hard risk limits elsewhere.
+  const canResumeGridByProfile = profile !== 'safe' && envFlags.tradeVenue === 'spot' && envFlags.gridEnabled;
+
+  switch (profile) {
+    case 'standard':
+      return {
+        canAutoApplyTuningTighten: true,
+        canAutoApplyTuningRelax: false,
+        canAutoSweepToHome: envFlags.aiPolicySweepAutoApply,
+        canPauseGrid: true,
+        canResumeGrid: canResumeGridByProfile,
+        canAutoBlacklistSymbols: envFlags.autoBlacklistEnabled,
+        canEnableUnwindPlans: false,
+      };
+    case 'pro':
+      return {
+        canAutoApplyTuningTighten: true,
+        canAutoApplyTuningRelax: allowRiskRelaxation,
+        canAutoSweepToHome: envFlags.aiPolicySweepAutoApply,
+        canPauseGrid: true,
+        canResumeGrid: canResumeGridByProfile,
+        canAutoBlacklistSymbols: envFlags.autoBlacklistEnabled,
+        canEnableUnwindPlans: false,
+      };
+    case 'aggressive':
+      return {
+        canAutoApplyTuningTighten: true,
+        canAutoApplyTuningRelax: allowRiskRelaxation,
+        canAutoSweepToHome: envFlags.aiPolicySweepAutoApply,
+        canPauseGrid: true,
+        canResumeGrid: canResumeGridByProfile,
+        canAutoBlacklistSymbols: envFlags.autoBlacklistEnabled,
+        canEnableUnwindPlans: false,
+      };
+    case 'safe':
+    default:
+      return {
+        canAutoApplyTuningTighten: false,
+        canAutoApplyTuningRelax: false,
+        canAutoSweepToHome: false,
+        canPauseGrid: true,
+        canResumeGrid: false,
+        canAutoBlacklistSymbols: false,
+        canEnableUnwindPlans: false,
+      };
+  }
+};

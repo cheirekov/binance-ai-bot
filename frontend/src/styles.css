@@ -839,11 +839,13 @@ input {
   display: grid;
   place-items: center;
   padding: 18px;
+  overflow-y: auto;
   z-index: 80;
 }
 
 .modal {
   width: min(680px, 100%);
+  max-height: min(86vh, 760px);
   max-height: min(86dvh, 760px);
   display: flex;
   flex-direction: column;

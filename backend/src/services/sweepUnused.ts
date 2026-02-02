@@ -112,7 +112,7 @@ export const sweepUnusedToHome = async (options: SweepUnusedOptions) => {
 
   const protectedAssets = new Set<string>([home]);
   if (options.keepAllowedQuotes ?? true) {
-    for (const asset of config.allowedQuoteAssets) protectedAssets.add(asset.toUpperCase());
+    for (const asset of config.quoteAssets) protectedAssets.add(asset.toUpperCase());
     protectedAssets.add(config.quoteAsset.toUpperCase());
   }
   for (const asset of options.keepAssets ?? []) protectedAssets.add(asset.toUpperCase());
