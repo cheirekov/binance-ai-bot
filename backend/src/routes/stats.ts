@@ -29,6 +29,8 @@ export async function statsRoutes(fastify: FastifyInstance) {
         aiPolicyAllowRiskRelaxation: config.aiPolicyAllowRiskRelaxation,
         aiPolicySweepAutoApply: config.aiPolicySweepAutoApply,
         autoBlacklistEnabled: config.autoBlacklistEnabled,
+        gridEnabled: config.gridEnabled,
+        tradeVenue: config.tradeVenue,
       },
       governorState,
     );
@@ -39,6 +41,16 @@ export async function statsRoutes(fastify: FastifyInstance) {
       profile: config.aiAutonomyProfile,
       capabilities,
       latest: persisted.meta?.latestCoach ?? null,
+    };
+  });
+
+  fastify.get('/stats/universe_debug', async () => {
+    const persisted = getPersistedState();
+    return {
+      at: persisted.meta?.universeDebug?.at ?? null,
+      allowedQuoteAssetsResolved: persisted.meta?.universeDebug?.allowedQuoteAssetsResolved ?? (persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets),
+      counts: persisted.meta?.universeDebug?.counts ?? null,
+      top: persisted.meta?.universeDebug?.top ?? [],
     };
   });
 }

@@ -243,6 +243,7 @@ export interface StrategyResponsePayload {
   universe?: {
     mode: 'static' | 'discovery';
     tradeUniverse: string[];
+    // Resolved quote assets used for discovery/scoring.
     quoteAssets: string[];
     tradeDenylist: string[];
     accountDenylist: Array<{ symbol: string; at: number; reason: string }>;
@@ -256,6 +257,9 @@ export interface StrategyResponsePayload {
       triggers?: string[];
     }>;
   };
+
+  // Convenience mirror of universe.quoteAssets (used by UI + debug tooling).
+  resolvedQuoteAssets?: string[];
 
   aiAutonomy?: { profile: AiAutonomyProfile; capabilities: AiAutonomyCapabilities };
   aiCoach?: {
@@ -354,6 +358,38 @@ export interface PersistedPayload {
       calls: number;
       lastAt?: number;
       lastDecision?: AiPolicyDecision;
+    };
+
+    // Token hygiene: when trading is blocked (HALT/emergency stop/etc), optionally allow
+    // an AI policy call at most once per hour for monitoring. This stores the last monitor timestamp.
+    aiPolicyBlockedMonitorAt?: number;
+
+    // Resolved quote assets (especially when QUOTE_ASSETS=AUTO).
+    resolvedQuoteAssets?: string[];
+
+    // Debug snapshot for "why no candidates" troubleshooting (best-effort).
+    universeDebug?: {
+      at: number;
+      allowedQuoteAssetsResolved: string[];
+      counts: {
+        totalExchangeSymbols: number;
+        venueBlocked: number;
+        quoteNotAllowed: number;
+        excludedQuote: number;
+        stableToStable: number;
+        leverageToken: number;
+        policyBlocked: number;
+        missingQuoteToHome: number;
+        volatilityFiltered: number;
+        minQuoteVolumeFiltered: number;
+        selected: number;
+      };
+      top: Array<{
+        symbol: string;
+        score: number;
+        quoteAsset: string;
+        quoteVolumeHome: number;
+      }>;
     };
     runtimeConfig?: {
       updatedAt: number;

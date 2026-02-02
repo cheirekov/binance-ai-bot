@@ -153,7 +153,20 @@ export const config = {
   homeAsset: stringFromEnv(process.env.HOME_ASSET ?? process.env.QUOTE_ASSET, 'EUR').toUpperCase(),
   // Trade universe (controls candidates + execution gate)
   tradeUniverse: listFromEnvUpper(process.env.TRADE_UNIVERSE, []),
-  quoteAssets: listFromEnvUpper(process.env.QUOTE_ASSETS, ['USDT', 'USDC', 'EUR']),
+
+  // QUOTE_ASSETS supports "AUTO" (resolved at runtime; see strategyService).
+  quoteAssetsMode: ((stripInlineComment(process.env.QUOTE_ASSETS) ?? '').trim().toUpperCase() === 'AUTO'
+    ? 'adaptive'
+    : 'fixed') as 'fixed' | 'adaptive',
+  // NOTE: In AUTO mode, runtime resolution is stored in persisted.meta and exposed via API.
+  // Important: when QUOTE_ASSETS=AUTO, do not treat "AUTO" as a literal asset ticker.
+  quoteAssets:
+    (stripInlineComment(process.env.QUOTE_ASSETS) ?? '').trim().toUpperCase() === 'AUTO'
+      ? []
+      : listFromEnvUpper(process.env.QUOTE_ASSETS, ['USDC', 'EUR']),
+  // EU-safe default: exclude USDT (and any other forbidden quotes) from AUTO resolution and discovery.
+  excludedQuoteAssets: listFromEnvUpper(process.env.EXCLUDED_QUOTE_ASSETS, ['USDT']),
+
   tradeDenylist: listFromEnvUpper(process.env.TRADE_DENYLIST, []),
 
   universeMaxSymbols: numberFromEnv(process.env.UNIVERSE_MAX_SYMBOLS, 50),
@@ -163,6 +176,7 @@ export const config = {
   autoSelectSymbol: boolFromEnv(process.env.AUTO_SELECT_SYMBOL, false),
   autoDiscoverSymbols: boolFromEnv(process.env.AUTO_DISCOVER_SYMBOLS, true),
   minQuoteVolume: numberFromEnv(process.env.MIN_QUOTE_VOLUME, 5_000_000),
+  minQuoteVolumeMode: oneOf(process.env.MIN_QUOTE_VOLUME_MODE, ['fixed', 'adaptive'] as const, 'fixed'),
   maxVolatilityPercent: numberFromEnv(process.env.MAX_VOLATILITY_PCT, 18),
   newsFeeds: listFromEnvRaw(
     process.env.NEWS_FEEDS,
@@ -224,6 +238,11 @@ export const config = {
   riskDrawdownHaltPct: Math.max(0, numberFromEnv(process.env.RISK_DRAWDOWN_HALT_PCT, 2.0)),
   riskFeeBurnCautionPct: Math.max(0, numberFromEnv(process.env.RISK_FEE_BURN_CAUTION_PCT, 0.2)),
   riskFeeBurnHaltPct: Math.max(0, numberFromEnv(process.env.RISK_FEE_BURN_HALT_PCT, 0.4)),
+
+  // NOTE: Trend is a per-symbol regime signal (Grid Guard, candidate scoring).
+  // RISK_TREND_GLOBAL_MODE controls whether the risk governor merely *reports* trend info.
+  // It must never pause entries or switch state due to trend alone.
+  riskTrendGlobalMode: oneOf(process.env.RISK_TREND_GLOBAL_MODE, ['off', 'info'] as const, 'off'),
   riskTrendAdxOn: Math.max(0, numberFromEnv(process.env.RISK_TREND_ADX_ON, 25)),
   riskTrendAdxOff: Math.max(0, numberFromEnv(process.env.RISK_TREND_ADX_OFF, 18)),
   riskMinStateSeconds: Math.max(0, Math.floor(numberFromEnv(process.env.RISK_MIN_STATE_SECONDS, 300))),
@@ -243,6 +262,7 @@ export const config = {
   aiPolicyMinIntervalSeconds: numberFromEnv(process.env.AI_POLICY_MIN_INTERVAL_SECONDS, 300),
   aiPolicyMaxCallsPerDay: numberFromEnv(process.env.AI_POLICY_MAX_CALLS_PER_DAY, 200),
   aiPolicyMaxCandidates: numberFromEnv(process.env.AI_POLICY_MAX_CANDIDATES, 8),
+  aiPolicyCallWhenBlocked: oneOf(process.env.AI_POLICY_CALL_WHEN_BLOCKED, ['never', 'hourly', 'always'] as const, 'never'),
   aiPolicyMaxGridAllocIncreasePctPerDay: numberFromEnv(process.env.AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY, 5),
   aiPolicyTuningAutoApply: boolFromEnv(process.env.AI_POLICY_TUNING_AUTO_APPLY, false),
   aiPolicySweepAutoApply: boolFromEnv(process.env.AI_POLICY_SWEEP_AUTO_APPLY, false),

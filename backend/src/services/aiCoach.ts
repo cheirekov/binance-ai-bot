@@ -388,7 +388,15 @@ export const runAiCoachOnce = async (): Promise<AiCoachSnapshot> => {
     autoBlacklistEnabled: config.autoBlacklistEnabled,
   };
 
-  const capabilities = resolveAutonomy(config.aiAutonomyProfile, envFlags, governorState);
+  const capabilities = resolveAutonomy(
+    config.aiAutonomyProfile,
+    {
+      ...envFlags,
+      gridEnabled: config.gridEnabled,
+      tradeVenue: config.tradeVenue,
+    },
+    governorState,
+  );
 
   const baseSnapshot: AiCoachSnapshot = {
     at: now,

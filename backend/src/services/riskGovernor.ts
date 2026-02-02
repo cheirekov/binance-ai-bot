@@ -227,7 +227,6 @@ export const evaluateRiskGovernor = (params: {
   const feeHalt = Math.max(0, config.riskFeeBurnHaltPct);
 
   const adxOn = Math.max(0, config.riskTrendAdxOn);
-  const adxOff = Math.max(0, config.riskTrendAdxOff);
 
   const adx = params.trend?.adx ?? null;
   const atrPct = params.trend?.atrPct ?? null;
@@ -237,7 +236,6 @@ export const evaluateRiskGovernor = (params: {
   const reasons: RiskGovernorDecision['reasons'] = [];
 
   const isTrendingOn = adx !== null && Number.isFinite(adx) && adx >= adxOn && (emaAligned ?? true);
-  const isTrendingOff = adx !== null && Number.isFinite(adx) && adx <= adxOff;
 
   if (ddDaily >= ddCaution && ddCaution > 0) {
     reasons.push({
@@ -252,10 +250,11 @@ export const evaluateRiskGovernor = (params: {
     });
   }
 
-  if (isTrendingOn) {
+  // Trend is informational only (per-symbol regime signal). It must not affect governor state.
+  if (config.riskTrendGlobalMode === 'info' && isTrendingOn) {
     reasons.push({
       code: 'trend',
-      detail: `Trend regime: ADX ${adx?.toFixed(1)} >= ${adxOn.toFixed(1)}`,
+      detail: `Trend regime (info): ADX ${adx?.toFixed(1)} >= ${adxOn.toFixed(1)}`,
     });
   }
 
@@ -285,9 +284,7 @@ export const evaluateRiskGovernor = (params: {
     (ddRolling >= ddHalt && ddHalt > 0) ||
     (params.feeBurnPct !== null && params.feeBurnPct >= feeHalt && feeHalt > 0);
 
-  const wantsCaution = reasons.some((r) =>
-    r.code === 'drawdown_daily' || r.code === 'drawdown_rolling' || r.code === 'trend' || r.code === 'fee_burn',
-  );
+  const wantsCaution = reasons.some((r) => r.code === 'drawdown_daily' || r.code === 'drawdown_rolling' || r.code === 'fee_burn');
 
   const prevState: RiskGovernorState = prev?.state ?? 'NORMAL';
   const prevSince = prev?.since ?? now;
@@ -303,11 +300,6 @@ export const evaluateRiskGovernor = (params: {
       nextState = 'HALT';
     } else if (!canLeaveHalt) {
       nextState = 'HALT';
-    } else if (wantsCaution && !(isTrendingOff && ddDaily < ddCaution && ddRolling < ddCaution)) {
-      // de-escalate cautiously
-      nextState = 'CAUTION';
-    } else if (canLeaveCurrent && !wantsCaution) {
-      nextState = 'NORMAL';
     } else {
       nextState = wantsCaution ? 'CAUTION' : 'NORMAL';
     }
@@ -318,8 +310,6 @@ export const evaluateRiskGovernor = (params: {
     } else if (!canLeaveCurrent) {
       nextState = 'CAUTION';
     } else if (!wantsCaution) {
-      nextState = 'NORMAL';
-    } else if (isTrendingOff && ddDaily < ddCaution && ddRolling < ddCaution && (params.feeBurnPct ?? 0) < feeCaution) {
       nextState = 'NORMAL';
     } else {
       nextState = 'CAUTION';
@@ -334,8 +324,10 @@ export const evaluateRiskGovernor = (params: {
   const changed = nextState !== prevState;
   const since = changed ? now : prevSince;
 
-  const entriesPaused = nextState !== 'NORMAL';
-  const gridBuyPausedGlobal = nextState === 'HALT' || (nextState === 'CAUTION' && isTrendingOn);
+  // entriesPaused is only for HALT (global pause). CAUTION uses tightening (multipliers/gating) elsewhere.
+  const entriesPaused = nextState === 'HALT';
+  // Trend-based pausing belongs to per-symbol Grid Guard, not a global switch.
+  const gridBuyPausedGlobal = nextState === 'HALT';
 
   return {
     state: nextState,
@@ -378,15 +370,20 @@ export const riskGovernorTick = async (seedSymbol?: string): Promise<RiskGoverno
     const nextFees = prevFees.filter((p: { at: number }) => withinMinutes(now, p.at, feeWindowMinutes));
     const feeBurnPct = computeFeeBurnPct(nextFees);
 
-    const trendRaw = await computeTrendSignals(symbol);
     const trend =
-      trendRaw.ok
-        ? {
-            adx: trendRaw.adx ?? null,
-            atrPct: trendRaw.atrPct ?? null,
-            bollingerBreak: trendRaw.bollingerBreak ?? null,
-            emaAligned: trendRaw.emaAligned ?? null,
-          }
+      config.riskTrendGlobalMode === 'info'
+        ? await (async () => {
+            // Best-effort informational only; never blocks trading by itself.
+            const trendRaw = await computeTrendSignals(symbol);
+            return trendRaw.ok
+              ? {
+                  adx: trendRaw.adx ?? null,
+                  atrPct: trendRaw.atrPct ?? null,
+                  bollingerBreak: trendRaw.bollingerBreak ?? null,
+                  emaAligned: trendRaw.emaAligned ?? null,
+                }
+              : null;
+          })()
         : null;
 
     const prevDecision = prevMeta?.decision ?? null;

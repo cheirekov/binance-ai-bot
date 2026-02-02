@@ -49,7 +49,7 @@ describe('risk governor state machine', () => {
     });
 
     expect(d1.state).toBe('CAUTION');
-    expect(d1.entriesPaused).toBe(true);
+    expect(d1.entriesPaused).toBe(false);
     expect(d1.since).toBe(t0.getTime());
 
     // Equity recovered but gate not elapsed -> should not flap back to NORMAL.

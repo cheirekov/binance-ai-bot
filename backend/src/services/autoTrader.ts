@@ -2079,26 +2079,15 @@ export const autoTradeTick = async (symbol?: string) => {
       aiPolicyAllowRiskRelaxation: config.aiPolicyAllowRiskRelaxation,
       aiPolicySweepAutoApply: config.aiPolicySweepAutoApply,
       autoBlacklistEnabled: config.autoBlacklistEnabled,
+      gridEnabled: config.gridEnabled,
+      tradeVenue: config.tradeVenue,
     },
     governor?.state ?? null,
   );
 
-  if (config.aiMode === 'advisory') {
-    const aiDecisionRaw = await runAiPolicy(symbol);
-    const aiDecision =
-      aiDecisionRaw && !entriesAllowedByGovernor && aiDecisionRaw.action === 'OPEN'
-        ? { ...aiDecisionRaw, action: 'HOLD' as const, reason: `Governor ${governor?.state ?? 'UNKNOWN'}: entries paused` }
-        : aiDecisionRaw;
-
-    recordDecision({
-      at: aiDecision?.at ?? Date.now(),
-      symbol: aiDecision?.symbol ?? symbol ?? 'UNKNOWN',
-      horizon: aiDecision?.horizon,
-      action: 'skipped',
-      reason: aiDecision
-        ? `AI policy advisory: ${aiDecision.action}${aiDecision.reason ? ` · ${aiDecision.reason}` : ''}`.slice(0, 200)
-        : 'AI policy advisory: rate-limited',
-    });
+  // If we can't place orders (missing exchange creds / venue disabled), skip AI to avoid wasting tokens.
+  if (!config.binanceApiKey || !config.binanceApiSecret) {
+    recordDecision({ at: Date.now(), symbol: symbol ?? 'UNKNOWN', action: 'skipped', reason: 'Binance API credentials missing' });
     await updateEquityTelemetry();
     return;
   }
@@ -2116,7 +2105,52 @@ export const autoTradeTick = async (symbol?: string) => {
     return;
   }
 
-  const aiDecision = await runAiPolicy(symbol);
+  const now = Date.now();
+  const blockedByGovernor = governor?.state === 'HALT';
+  const blockedReason = blockedByGovernor ? `Governor ${governor.state}: entries paused` : null;
+
+  const blockedMode = config.aiPolicyCallWhenBlocked;
+  const lastBlockedMonitorAt = persisted.meta?.aiPolicyBlockedMonitorAt ?? 0;
+  const blockedMonitorDue =
+    blockedByGovernor &&
+    blockedMode === 'hourly' &&
+    (!lastBlockedMonitorAt || now - lastBlockedMonitorAt >= 60 * 60 * 1000);
+
+  const shouldCallAiPolicy = !blockedByGovernor || blockedMode === 'always' || blockedMonitorDue;
+
+  const aiDecisionRaw = shouldCallAiPolicy ? await runAiPolicy(symbol) : null;
+
+  if (blockedByGovernor && blockedMode === 'hourly' && blockedMonitorDue) {
+    persistMeta(persisted, { aiPolicyBlockedMonitorAt: now });
+  }
+
+  const aiDecisionPrepared =
+    blockedByGovernor && aiDecisionRaw
+      ? { ...aiDecisionRaw, action: 'HOLD' as const, reason: blockedReason ?? aiDecisionRaw.reason }
+      : aiDecisionRaw;
+
+  if (config.aiMode === 'advisory') {
+    const aiDecision =
+      aiDecisionPrepared && !entriesAllowedByGovernor && aiDecisionPrepared.action === 'OPEN'
+        ? { ...aiDecisionPrepared, action: 'HOLD' as const, reason: `Governor ${governor?.state ?? 'UNKNOWN'}: entries paused` }
+        : aiDecisionPrepared;
+
+    recordDecision({
+      at: aiDecision?.at ?? now,
+      symbol: aiDecision?.symbol ?? symbol ?? 'UNKNOWN',
+      horizon: aiDecision?.horizon,
+      action: 'skipped',
+      reason: aiDecision
+        ? `AI policy advisory: ${aiDecision.action}${aiDecision.reason ? ` · ${aiDecision.reason}` : ''}`.slice(0, 200)
+        : blockedByGovernor && !shouldCallAiPolicy
+          ? `AI skipped: blocked (${blockedReason ?? 'blocked'})`.slice(0, 200)
+          : 'AI policy advisory: rate-limited',
+    });
+    await updateEquityTelemetry();
+    return;
+  }
+
+  const aiDecision = aiDecisionPrepared;
   if (config.aiMode === 'gated-live' && !aiDecision) {
     // If AI policy is enabled but rate-limited/unavailable, hold (manage exits, no new entries).
     if (config.gridEnabled) {
@@ -2393,10 +2427,20 @@ export const autoTradeTick = async (symbol?: string) => {
 
     if (!entriesAllowedByGovernor) {
       // Governor may pause entries while still allowing exit management.
+      const beforeAt = persisted.meta?.lastAutoTrade?.at ?? 0;
       if (config.portfolioEnabled) {
         await portfolioTick(symbol, { entriesAllowed: false });
       } else {
         await singleSymbolTick(symbol, { entriesAllowed: false });
+      }
+      const afterAt = persisted.meta?.lastAutoTrade?.at ?? 0;
+      if (blockedByGovernor && !shouldCallAiPolicy && afterAt === beforeAt) {
+        recordDecision({
+          at: Date.now(),
+          symbol: symbol ?? 'UNKNOWN',
+          action: 'skipped',
+          reason: `AI skipped: blocked (${blockedReason ?? 'blocked'})`.slice(0, 200),
+        });
       }
       await updateEquityTelemetry();
       return;

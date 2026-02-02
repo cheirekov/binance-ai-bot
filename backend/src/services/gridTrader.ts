@@ -687,7 +687,9 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
     const adxOff = Math.max(0, config.riskTrendAdxOff);
 
     const trendBad = adx !== null && Number.isFinite(adx) && adx >= adxOn;
-    const volBad = atrPct !== null && Number.isFinite(atrPct) && atrPct >= Math.max(0, config.gridAtrPctMax);
+    const atrMax = Math.max(0, config.gridAtrPctMax);
+    // Optional: only enforce ATR% cap if configured > 0
+    const volBad = atrMax > 0 && atrPct !== null && Number.isFinite(atrPct) && atrPct >= atrMax;
 
     const breakdownFloor =
       bbLower !== null && Number.isFinite(bbLower) && bbLower > 0
@@ -784,7 +786,7 @@ const reconcileGridOrders = async (grid: GridState, info: SymbolInfo, balances: 
       } catch (error) {
         logger.warn(
           { err: errorToLogObject(error), symbol: grid.symbol, orderId },
-          'Cancel open BUY order failed (liquidity buy-pause)',
+          'Cancel open BUY order failed (grid buy-pause)',
         );
       }
     }

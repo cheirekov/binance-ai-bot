@@ -66,7 +66,20 @@ export const getAutoBlacklist = () => {
 };
 
 const deriveQuoteAsset = (symbol: string): string => {
-  const candidates = [...config.quoteAssets, 'BTC', 'BNB', 'ETH'].map((q) => q.toUpperCase());
+  const resolved = persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets;
+  const candidates = Array.from(
+    new Set([
+      ...(resolved.length ? resolved : config.quoteAssets),
+      config.homeAsset,
+      config.quoteAsset,
+      'EUR',
+      'BTC',
+      'ETH',
+      'BNB',
+      'USDC',
+      'USDT',
+    ]),
+  ).map((q) => q.toUpperCase());
   const sym = symbol.toUpperCase();
   const match = candidates.find((q) => sym.endsWith(q));
   return match ?? sym.slice(-3);
@@ -112,10 +125,24 @@ export const getSymbolBlockInfo = (symbolInput: string, now = Date.now()): Symbo
   }
 
   // If universe is auto-discovered (TRADE_UNIVERSE empty), gate trading by quote asset.
+  // Important: when QUOTE_ASSETS=AUTO, config.quoteAssets can be empty; use persisted.meta.resolvedQuoteAssets.
   if (config.tradeUniverse.length === 0) {
-    const quote = deriveQuoteAsset(sym);
-    if (!config.quoteAssets.map((q) => q.toUpperCase()).includes(quote)) {
-      return { blocked: true, code: 'not_in_universe', reason: `Quote asset ${quote} not in QUOTE_ASSETS`, source: 'QUOTE_ASSETS' };
+    const resolved = persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets;
+    const effectiveAllowed = resolved.length ? resolved : config.quoteAssets.length ? config.quoteAssets : [config.homeAsset];
+    const allowed = new Set(effectiveAllowed.map((q) => q.toUpperCase()));
+    const excluded = new Set((config.excludedQuoteAssets ?? []).map((q) => q.toUpperCase()));
+
+    const quote = deriveQuoteAsset(sym).toUpperCase();
+    if (excluded.has(quote)) {
+      return {
+        blocked: true,
+        code: 'not_in_universe',
+        reason: `Quote asset ${quote} excluded by EXCLUDED_QUOTE_ASSETS`,
+        source: 'EXCLUDED_QUOTE_ASSETS',
+      };
+    }
+    if (!allowed.has(quote)) {
+      return { blocked: true, code: 'not_in_universe', reason: `Quote asset ${quote} not allowed`, source: 'QUOTE_ASSETS' };
     }
   }
 

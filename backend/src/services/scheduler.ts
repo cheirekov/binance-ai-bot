@@ -10,17 +10,31 @@ let timer: NodeJS.Timeout | null = null;
 
 const runOnce = async () => {
   try {
-    let symbolToTrade: string | undefined = undefined;
-    if (config.autoSelectSymbol) {
-      const result = await refreshBestSymbol();
-      symbolToTrade = result.bestSymbol;
-    } else {
-      await refreshStrategies(config.defaultSymbol);
-      symbolToTrade = config.defaultSymbol;
+    // Always refresh universe/candidates so the bot keeps scanning the exchange, even when a symbol is pinned.
+    // When AUTO_SELECT_SYMBOL=false, we do NOT switch activeSymbol; we only update rankedCandidates + debug.
+    let best: string | undefined;
+    try {
+      const discovery = await refreshBestSymbol({
+        setActiveSymbol: config.autoSelectSymbol,
+        refreshBestSymbolStrategies: config.autoSelectSymbol,
+      });
+      best = discovery.bestSymbol;
+    } catch (error) {
+      // Best-effort: discovery failures must not block the trading tick.
+      logger.warn({ err: errorToLogObject(error) }, 'Universe discovery tick failed');
     }
+
+    const symbolToTrade = config.autoSelectSymbol ? (best ?? config.defaultSymbol) : config.defaultSymbol;
+
+    // Ensure the traded symbol always has a fresh strategy bundle.
+    if (!config.autoSelectSymbol) {
+      await refreshStrategies(symbolToTrade);
+    }
+
     // Risk Governor runs on live equity + indicators (no DB dependency). Best-effort: failures must not stop trading loop.
     await riskGovernorTick(symbolToTrade);
     await autoTradeTick(symbolToTrade);
+
     // Trade sync runs in the background (never blocks the trading tick).
     void tradeSyncTick();
   } catch (error) {

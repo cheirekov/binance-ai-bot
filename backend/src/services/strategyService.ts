@@ -26,6 +26,9 @@ let activeSymbol =
 let lastCandidates: { symbol: string; score: number }[] = persisted.meta?.rankedCandidates ?? [];
 let lastAutoSelectAt: number | null = persisted.meta?.autoSelectUpdatedAt ?? null;
 
+// Resolved quote assets used for discovery/scoring (especially when QUOTE_ASSETS=AUTO).
+let resolvedQuoteAssets: string[] = persisted.meta?.resolvedQuoteAssets ?? config.quoteAssets;
+
 const stableLikeAssets = new Set([
   'USD',
   'EUR',
@@ -104,7 +107,20 @@ export const normalizeSymbol = (symbol?: string) => {
 };
 
 const deriveQuoteAsset = (symbol: string): string => {
-  const candidates = [...config.quoteAssets, 'BTC', 'BNB', 'ETH'];
+  // Best-effort heuristic (exact quote asset is taken from exchangeInfo in discovery paths).
+  const candidates = Array.from(
+    new Set([
+      ...(resolvedQuoteAssets.length ? resolvedQuoteAssets : config.quoteAssets),
+      config.homeAsset,
+      config.quoteAsset,
+      'EUR',
+      'BTC',
+      'ETH',
+      'BNB',
+      'USDC',
+      'USDT',
+    ]),
+  );
   const match = candidates.find((q) => symbol.endsWith(q));
   if (match) return match;
   // fallback: last 3 characters
@@ -335,6 +351,9 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     .filter((s) => !isBlocked(s.toUpperCase()))
     .sort((a, b) => a.localeCompare(b));
 
+  // Ensure we have something sane for UI payload even before discovery runs.
+  resolvedQuoteAssets = persisted.meta?.resolvedQuoteAssets ?? resolvedQuoteAssets ?? config.quoteAssets;
+
   return {
     status: state.status,
     symbol,
@@ -359,7 +378,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
     universe: {
       mode: config.tradeUniverse.length > 0 ? 'static' : 'discovery',
       tradeUniverse: config.tradeUniverse,
-      quoteAssets: config.quoteAssets,
+      quoteAssets: resolvedQuoteAssets,
       tradeDenylist: config.tradeDenylist,
       accountDenylist: Object.entries(persisted.meta?.accountBlacklist ?? {})
         .map(([symbol, row]) => ({ symbol: symbol.toUpperCase(), at: row.at ?? 0, reason: row.reason ?? 'account_blacklist' }))
@@ -378,6 +397,7 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
         .filter((r) => r.symbol && typeof r.bannedUntil === 'number' && r.bannedUntil > now)
         .sort((a, b) => a.symbol.localeCompare(b.symbol)),
     },
+    resolvedQuoteAssets,
     aiAutonomy: {
       profile: config.aiAutonomyProfile,
       capabilities: resolveAutonomy(
@@ -386,6 +406,8 @@ export const getStrategyResponse = (symbolInput?: string): StrategyResponsePaylo
           aiPolicyAllowRiskRelaxation: config.aiPolicyAllowRiskRelaxation,
           aiPolicySweepAutoApply: config.aiPolicySweepAutoApply,
           autoBlacklistEnabled: config.autoBlacklistEnabled,
+          gridEnabled: config.gridEnabled,
+          tradeVenue: config.tradeVenue,
         },
         persisted.meta?.riskGovernor?.decision?.state ?? null,
       ),
@@ -448,64 +470,130 @@ const scoreSnapshot = (snapshot: {
 
 const looksLeverageToken = (symbol: string) => /(UP|DOWN|BULL|BEAR)$/.test(symbol);
 
-export const refreshBestSymbol = async () => {
+export const refreshBestSymbol = async (options?: { setActiveSymbol?: boolean; refreshBestSymbolStrategies?: boolean }) => {
   const baseSymbols = config.tradeUniverse.length ? config.tradeUniverse : [config.defaultSymbol];
   let symbols = [...baseSymbols];
   let discovered: { symbol: string; quoteAsset: string; baseAsset: string }[] = [];
 
+  const now = Date.now();
+  pruneExpiredAutoBlacklist(now);
+  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
+
+  // Universe debug (best-effort): helps diagnose "bot sees nothing" quickly.
+  const debug = {
+    at: now,
+    allowedQuoteAssetsResolved: [] as string[],
+    counts: {
+      totalExchangeSymbols: 0,
+      venueBlocked: 0,
+      quoteNotAllowed: 0,
+      excludedQuote: 0,
+      stableToStable: 0,
+      leverageToken: 0,
+      policyBlocked: 0,
+      missingQuoteToHome: 0,
+      volatilityFiltered: 0,
+      minQuoteVolumeFiltered: 0,
+      selected: 0,
+    },
+    top: [] as Array<{ symbol: string; score: number; quoteAsset: string; quoteVolumeHome: number }>,
+  };
+
+  const exchangeSymbols = await fetchTradableSymbols();
+  debug.counts.totalExchangeSymbols = exchangeSymbols.length;
+
+  // Resolve allowed quote assets (AUTO is EU-friendly by default: excludes USDT).
+  const resolveAllowedQuoteAssets = (): string[] => {
+    const excluded = new Set((config.excludedQuoteAssets ?? []).map((s) => s.toUpperCase()));
+
+    const raw =
+      config.quoteAssetsMode === 'adaptive'
+        ? [config.homeAsset, 'EUR', 'BTC', 'ETH', 'BNB'].map((s) => s.toUpperCase())
+        : (config.quoteAssets ?? []).map((s) => s.toUpperCase());
+
+    const uniq = Array.from(new Set(raw)).filter(Boolean).filter((q) => !excluded.has(q));
+
+    const home = config.homeAsset.toUpperCase();
+    const hasDirect = (quote: string) => {
+      if (quote === home) return true;
+      const direct = `${quote}${home}`;
+      const inverse = `${home}${quote}`;
+      return exchangeSymbols.some((s) => s.symbol === direct && s.status === 'TRADING') || exchangeSymbols.some((s) => s.symbol === inverse && s.status === 'TRADING');
+    };
+
+    // Only keep quotes that can be normalized into HOME via a direct market (same shape as getQuoteToHomeRate()).
+    return uniq.filter((q) => hasDirect(q));
+  };
+
+  resolvedQuoteAssets = resolveAllowedQuoteAssets();
+  debug.allowedQuoteAssetsResolved = resolvedQuoteAssets;
+
+  // Persist resolved quotes for UI/debug even if later scoring fails.
+  persistMeta(persisted, { resolvedQuoteAssets });
+
+  const allowedQuoteSet = new Set(resolvedQuoteAssets.map((s) => s.toUpperCase()));
+  const excludedQuoteSet = new Set((config.excludedQuoteAssets ?? []).map((s) => s.toUpperCase()));
+
   // If the user provided an explicit universe, treat it as the universe for auto-select.
-  // Auto-discovery is only used to validate/filter tradable SPOT symbols, not to expand the list.
   if (config.autoDiscoverSymbols && config.tradeUniverse.length === 0) {
-    try {
-      const exchangeSymbols = await fetchTradableSymbols();
-	      discovered = exchangeSymbols
-	        .filter(
-	          (s) =>
-	            isVenueTradable(s) &&
-	            config.quoteAssets.includes(s.quoteAsset.toUpperCase()) &&
-	            !getSymbolBlockInfo(s.symbol, Date.now()).blocked &&
-	            !isStableToStablePair(s.baseAsset, s.quoteAsset) &&
-	            !looksLeverageToken(s.symbol),
-	        )
-	        .map((s) => ({
-          symbol: s.symbol.toUpperCase(),
-          quoteAsset: s.quoteAsset.toUpperCase(),
-          baseAsset: s.baseAsset.toUpperCase(),
-        }));
-      symbols = discovered.map((s) => s.symbol);
-    } catch (error) {
-      logger.warn({ err: errorToLogObject(error) }, 'Auto-discover failed; falling back to configured symbols');
-    }
+    discovered = exchangeSymbols
+      .filter((s) => {
+        if (!isVenueTradable(s)) {
+          debug.counts.venueBlocked += 1;
+          return false;
+        }
+
+        const quote = s.quoteAsset.toUpperCase();
+        if (excludedQuoteSet.has(quote)) {
+          debug.counts.excludedQuote += 1;
+          return false;
+        }
+        if (!allowedQuoteSet.has(quote)) {
+          debug.counts.quoteNotAllowed += 1;
+          return false;
+        }
+
+        if (isBlocked(s.symbol)) {
+          debug.counts.policyBlocked += 1;
+          return false;
+        }
+        if (isStableToStablePair(s.baseAsset, s.quoteAsset)) {
+          debug.counts.stableToStable += 1;
+          return false;
+        }
+        if (looksLeverageToken(s.symbol)) {
+          debug.counts.leverageToken += 1;
+          return false;
+        }
+        return true;
+      })
+      .map((s) => ({
+        symbol: s.symbol.toUpperCase(),
+        quoteAsset: s.quoteAsset.toUpperCase(),
+        baseAsset: s.baseAsset.toUpperCase(),
+      }));
+    symbols = discovered.map((s) => s.symbol);
   } else if (config.autoDiscoverSymbols && config.tradeUniverse.length > 0) {
-    try {
-      const exchangeSymbols = await fetchTradableSymbols();
-      const infoBySymbol = new Map(exchangeSymbols.map((s) => [s.symbol.toUpperCase(), s]));
-	      const tradable = new Set(
-	        exchangeSymbols
-	          .filter((s) => isVenueTradable(s) && !getSymbolBlockInfo(s.symbol, Date.now()).blocked && !looksLeverageToken(s.symbol))
-	          .map((s) => s.symbol.toUpperCase()),
-	      );
-      symbols = baseSymbols
-        .map((s) => s.toUpperCase())
-        .filter((s) => tradable.has(s))
-        .filter((s) => {
-          const info = infoBySymbol.get(s);
-          if (!info) return true;
-          return !isStableToStablePair(info.baseAsset, info.quoteAsset);
-        });
-    } catch (error) {
-      logger.warn({ err: errorToLogObject(error) }, 'Auto-discover validation failed; using configured symbols as-is');
-    }
+    const infoBySymbol = new Map(exchangeSymbols.map((s) => [s.symbol.toUpperCase(), s]));
+    const tradable = new Set(
+      exchangeSymbols
+        .filter((s) => isVenueTradable(s) && !isBlocked(s.symbol) && !looksLeverageToken(s.symbol))
+        .map((s) => s.symbol.toUpperCase()),
+    );
+    symbols = baseSymbols
+      .map((s) => s.toUpperCase())
+      .filter((s) => tradable.has(s))
+      .filter((s) => {
+        const info = infoBySymbol.get(s);
+        if (!info) return true;
+        return !isStableToStablePair(info.baseAsset, info.quoteAsset);
+      });
   }
 
   // fallback if discovery returned nothing
   if (!symbols.length) {
     symbols = baseSymbols;
   }
-
-  const now = Date.now();
-  pruneExpiredAutoBlacklist(now);
-  const isBlocked = (s: string) => getSymbolBlockInfo(s, now).blocked;
 
   symbols = symbols.filter((s) => !isBlocked(s));
   discovered = discovered.filter((s) => !isBlocked(s.symbol));
@@ -546,75 +634,119 @@ export const refreshBestSymbol = async () => {
 
   const candidates: { symbol: string; score: number }[] = [];
 
-  // Fetch balances once to make the selection wallet-aware without extra API calls.
-  let balances: Balance[] = [];
-  try {
-    balances = await cacheBalances();
-  } catch {
-    balances = [];
-  }
-  const balanceFreeByAsset = new Map(balances.map((b) => [b.asset.toUpperCase(), b.free]));
-  const hasFree = (asset: string) => (balanceFreeByAsset.get(asset.toUpperCase()) ?? 0) > 0;
-  const homeAsset = config.homeAsset.toUpperCase();
+  const adaptiveMinQuoteVolumeHome = () => {
+    // Home-normalized quote volume floor (sane bounds). Uses USD-ish MAX_POSITION_SIZE_USDT as a proxy.
+    const base = Math.max(100_000, Math.max(0, config.maxPositionSizeUsdt) * 500);
+    return Math.min(200_000_000, Math.max(100_000, Math.floor(base)));
+  };
 
+  const minQuoteVolumeHomeFloor =
+    config.minQuoteVolumeMode === 'adaptive' ? adaptiveMinQuoteVolumeHome() : Math.max(0, config.minQuoteVolume);
+
+  // Score symbols without wallet assumptions (conversion may occur later in execution).
   for (const symbol of symbols) {
     try {
-      const snap = await get24hStats(symbol);
-      const quoteAsset = deriveQuoteAsset(symbol).toUpperCase();
-      const baseAsset = symbol.slice(0, Math.max(0, symbol.length - quoteAsset.length)).toUpperCase();
-      const intendedSide =
-        snap.priceChangePercent > 2
-          ? 'BUY'
-          : snap.priceChangePercent < -2
-            ? 'SELL'
-            : snap.priceChangePercent >= 0
-              ? 'BUY'
-              : 'SELL';
+      const info = exchangeSymbols.find((s) => s.symbol.toUpperCase() === symbol.toUpperCase());
+      const quoteAsset = (info?.quoteAsset ?? deriveQuoteAsset(symbol)).toUpperCase();
+      const baseAsset = (info?.baseAsset ?? '').toUpperCase();
 
-      // Spot wallet-aware constraints: futures positions use shared margin and don't require holding base/quote.
-      if (config.tradeVenue !== 'futures') {
-        // Skip symbols that we can't act on with current wallet (e.g., BUY requires quote balance).
-        if (intendedSide === 'BUY' && balances.length > 0 && !hasFree(quoteAsset)) {
-          // Allow if we can convert from HOME_ASSET (conversion happens later during execution).
-          if (!(config.conversionEnabled && hasFree(homeAsset))) continue;
-        }
-        if (intendedSide === 'SELL' && balances.length > 0 && !hasFree(baseAsset)) {
-          continue;
-        }
+      if (!baseAsset || !quoteAsset) continue;
+      if (excludedQuoteSet.has(quoteAsset)) continue;
+      if (isStableToStablePair(baseAsset, quoteAsset)) continue;
+      if (looksLeverageToken(symbol)) continue;
+
+      const snap = await get24hStats(symbol);
+
+      const volPct = Math.abs((snap.highPrice - snap.lowPrice) / Math.max(snap.price, 0.00000001)) * 100;
+      if (volPct > config.maxVolatilityPercent) {
+        debug.counts.volatilityFiltered += 1;
+        continue;
       }
 
-      const volPct = Math.abs((snap.highPrice - snap.lowPrice) / snap.price) * 100;
-      if (volPct > config.maxVolatilityPercent) continue;
       const quoteToHome = await getQuoteToHomeRate(quoteAsset, config.homeAsset);
-      if (!quoteToHome) continue;
+      if (!quoteToHome) {
+        debug.counts.missingQuoteToHome += 1;
+        continue;
+      }
+
       const quoteVolHome = (snap.quoteVolume ?? 0) * quoteToHome;
-      if (quoteVolHome < config.minQuoteVolume) continue;
+      if (quoteVolHome < minQuoteVolumeHomeFloor) {
+        debug.counts.minQuoteVolumeFiltered += 1;
+        continue;
+      }
 
       const score = scoreSnapshot({ ...snap, quoteVolume: quoteVolHome });
       candidates.push({ symbol, score });
     } catch (error: unknown) {
       const errObj = error as { code?: string; message?: string };
-      logger.warn(
-        { symbol, code: errObj?.code, msg: errObj?.message },
-        'Skipping symbol during auto-select',
-      );
+      logger.warn({ symbol, code: errObj?.code, msg: errObj?.message }, 'Skipping symbol during auto-select');
     }
   }
 
   if (!candidates.length) {
-    throw new Error('No symbols could be scored. Check TRADE_UNIVERSE/QUOTE_ASSETS, denylist, or API connectivity.');
+    persistMeta(persisted, {
+      universeDebug: {
+        at: debug.at,
+        allowedQuoteAssetsResolved: debug.allowedQuoteAssetsResolved,
+        counts: debug.counts,
+        top: [],
+      },
+    });
+    throw new Error('No symbols could be scored. Check QUOTE_ASSETS/EXCLUDED_QUOTE_ASSETS, denylist, or API connectivity.');
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const best = candidates[0];
-  activeSymbol = best.symbol.toUpperCase();
-  lastCandidates = candidates;
-  lastAutoSelectAt = Date.now();
+
+  // Store debug top-20 with normalized quote volume in HOME (best-effort).
+  const top: Array<{ symbol: string; score: number; quoteAsset: string; quoteVolumeHome: number }> = [];
+  for (const row of candidates.slice(0, 20)) {
+    const info = exchangeSymbols.find((s) => s.symbol.toUpperCase() === row.symbol.toUpperCase());
+    const quoteAsset = (info?.quoteAsset ?? deriveQuoteAsset(row.symbol)).toUpperCase();
+    try {
+      const snap = await get24hStats(row.symbol);
+      const quoteToHome = await getQuoteToHomeRate(quoteAsset, config.homeAsset);
+      const quoteVolHome = quoteToHome ? (snap.quoteVolume ?? 0) * quoteToHome : 0;
+      top.push({ symbol: row.symbol.toUpperCase(), score: row.score, quoteAsset, quoteVolumeHome: quoteVolHome });
+    } catch {
+      top.push({ symbol: row.symbol.toUpperCase(), score: row.score, quoteAsset, quoteVolumeHome: 0 });
+    }
+  }
+  debug.counts.selected = candidates.length;
+
   persistMeta(persisted, {
-    activeSymbol,
-    rankedCandidates: lastCandidates.slice(0, 200),
-    autoSelectUpdatedAt: lastAutoSelectAt,
+    universeDebug: {
+      at: debug.at,
+      allowedQuoteAssetsResolved: debug.allowedQuoteAssetsResolved,
+      counts: debug.counts,
+      top,
+    },
   });
-  await refreshStrategies(best.symbol, { useAi: true });
+
+  const best = candidates[0];
+  lastCandidates = candidates;
+
+  const setActive = options?.setActiveSymbol ?? true;
+  const refreshStrategiesForBest = options?.refreshBestSymbolStrategies ?? setActive;
+
+  if (setActive) {
+    activeSymbol = best.symbol.toUpperCase();
+    lastAutoSelectAt = Date.now();
+
+    persistMeta(persisted, {
+      activeSymbol,
+      rankedCandidates: lastCandidates.slice(0, 200),
+      autoSelectUpdatedAt: lastAutoSelectAt,
+    });
+  } else {
+    // Keep scanning the full exchange for opportunities even when operator pins a symbol.
+    // Persist candidates for UI/debug, but do NOT switch activeSymbol.
+    persistMeta(persisted, {
+      rankedCandidates: lastCandidates.slice(0, 200),
+    });
+  }
+
+  if (refreshStrategiesForBest) {
+    await refreshStrategies(best.symbol, { useAi: true });
+  }
   return { bestSymbol: best.symbol, candidates };
 };

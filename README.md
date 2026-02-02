@@ -6,10 +6,10 @@ Autonomous Binance trading assistant with an OpenAI-driven strategy layer and a 
 - Fastify API with Binance Spot client, OpenAI strategy reinforcement, and simple scheduler to keep strategies fresh.
 - Regime-based indicator engine (EMA/RSI/ATR/ADX/Bollinger) with deterministic entry/exit levels and risk sizing.
 - React + Vite dashboard for live market stats, AI notes, balances, and quick simulated trades.
-- Universe scanner that auto-picks a wallet-aware “best” symbol and reports the last auto-trade decision.
+- Universe scanner that continuously ranks opportunities across the exchange and reports candidates (supports `QUOTE_ASSETS=AUTO` for multi-quote discovery without USDT assumptions).
 - Optional portfolio mode: multiple concurrent long positions, conversion to required quote assets, and “risk-off” return to `HOME_ASSET`.
 - Optional spot grid mode: auto-discovers range-bound candidates (heuristics) and maintains a limit-order grid (spot-only).
-- Risk Governor (account-level): state machine `NORMAL/CAUTION/HALT` driven by mark-to-market equity drawdown, trend regime, and fee burn (computed from live balances + tickers + `state.json`, not SQLite).
+- Risk Governor (account-level): state machine `NORMAL/CAUTION/HALT` driven by mark-to-market equity drawdown, fee burn, and data/liquidity failures (computed from live balances + tickers + `state.json`, not SQLite). Trend is **per-symbol only** (Grid Guard + candidate scoring) and must not globally pause trading.
 - Grid Guard (per-grid): detects trend / falling-knife / vol spike regimes and automatically pauses **new grid BUYs** while keeping SELLs active to unwind.
 - Optional AI policy (gated): LLM can propose OPEN/CLOSE/HOLD/PANIC and bounded parameter tuning; engine still validates and enforces caps.
 - AI Coach (slow loop): periodically reviews compact summaries (governor, PnL, grids, candidates, news) and proposes bounded tuning / grid actions / symbol bans.
@@ -28,13 +28,14 @@ Basic setup:
 cp .env.spot.basic.example .env
 docker-compose up --build
 ```
-   - Universe discovery is controlled by `QUOTE_ASSETS`.
+   - Universe discovery is controlled by `QUOTE_ASSETS` (set `QUOTE_ASSETS=AUTO` for EU-friendly discovery across multiple quote assets without defaulting to USDT). Use `EXCLUDED_QUOTE_ASSETS` (default `USDT`) to hard-exclude quotes from discovery.
    - For full discovery, leave `TRADE_UNIVERSE=` empty. If you set `TRADE_UNIVERSE`, the bot will only open new trades within that list.
    - Auto-trading requires both `AUTO_TRADE_ENABLED=true` and `TRADING_ENABLED=true`.
    - Futures (advanced, higher risk): set `TRADE_VENUE=futures`, provide a key with futures permissions, and set `FUTURES_ENABLED=true`. Start with low leverage (e.g. `FUTURES_LEVERAGE=2`) and test on futures testnet first.
    - Portfolio mode (optional): set `PORTFOLIO_ENABLED=true`, choose `HOME_ASSET` (e.g. `USDC`), and optionally `CONVERSION_ENABLED=true` if you allow auto-converting into BTC/XRP quotes.
    - Spot grid mode (optional): set `GRID_ENABLED=true`. Grids are **spot-only** and only run on symbols quoted in `HOME_ASSET` (e.g. `BTCUSDC` if `HOME_ASSET=USDC`). Auto-discovery uses heuristics, or you can pin `GRID_SYMBOLS=BTCUSDC,ETHUSDC`.
    - AI policy (optional): set `AI_MODE=advisory` (no auto execution) or `AI_MODE=gated-live` (AI proposes, engine executes if safe). AI policy is rate-limited by `AI_POLICY_MIN_INTERVAL_SECONDS` and `AI_POLICY_MAX_CALLS_PER_DAY`.
+     - Token hygiene: `AI_POLICY_CALL_WHEN_BLOCKED=never|hourly|always` controls whether the bot calls the model when trading is blocked (HALT/emergency stop/daily loss cap). Default is `never`.
      - The policy can also suggest bounded tuning (e.g. `MIN_QUOTE_VOLUME`, `PORTFOLIO_MAX_POSITIONS`). You can apply it from the UI (“Apply AI tuning”), or set `AI_POLICY_TUNING_AUTO_APPLY=true`.
      - Grid allocation tuning via `GRID_MAX_ALLOC_PCT` is additionally clamped: `AI_POLICY_MAX_GRID_ALLOC_INCREASE_PCT_PER_DAY` limits how much the AI can increase it per day (decreases are allowed).
      - Risk relaxation is **disabled by default**: `AI_POLICY_ALLOW_RISK_RELAXATION=false` blocks AI actions that increase risk (e.g. `RESUME_GRID`). Enable it only with explicit operator approval.
@@ -94,7 +95,8 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - Frontend shows the current active symbol, the top candidates from the scanner, and the last auto-trade decision/reason.
 - Risk Governor safety rules:
   - Decisions are computed from live balances + tickers + `state.json` (SQLite is best-effort logging only).
-  - `CAUTION/HALT` never allow risk increases; only pauses/tightening are applied.
+  - Trend is **not** a global stop; it is only used per-symbol (Grid Guard + candidate scoring).
+  - `CAUTION/HALT` never allow risk increases; only tightening is applied.
   - No forced market-selling unless explicitly enabled (see `RISK_HALT_MARKET_EXIT=false` default).
 - Grid Guard safety rules:
   - When triggered it pauses **new BUYs only** and cancels open BUY orders; SELL orders remain active to unwind inventory.
@@ -110,9 +112,9 @@ To try Binance spot testnet, set `BINANCE_BASE_URL=https://testnet.binance.visio
 - News sentiment uses RSS/Atom feeds; `NEWS_FEEDS` must point to actual XML feeds (not HTML pages). Many sites (including Binance news pages) serve HTML and/or block server-side fetches.
 - Grid mode is **spot-only** and works best in sideways markets. In trends/breakouts it can accumulate losses; keep `GRID_MAX_ALLOC_PCT` small until you’re confident. Use `GRID_BREAKOUT_ACTION=cancel` to stop grids when price exits the range.
 - Risk Governor / Grid Guard manual SIM validation checklist:
-  - Force trend regime (high ADX) and verify: Risk Governor may enter `CAUTION/HALT`, and grid BUY legs pause while SELLs continue.
+  - Force trend regime (high ADX) and verify: **Risk Governor does not switch to CAUTION/HALT due to trend alone**; per-grid BUY legs pause while SELLs continue.
   - Force liquidity floor breach (`MIN_QUOTE_VOLUME`) and verify: per-symbol grid BUYs pause, open BUY orders are cancelled, SELLs remain.
-  - Force drawdown and verify: `CAUTION` blocks new entries; `HALT` blocks new entries + prevents starting new grids.
+  - Force drawdown and verify: `CAUTION` applies tightening (smaller sizing / stricter gates); `HALT` blocks new entries + prevents starting new grids.
   - Verify: no market exits occur unless `RISK_HALT_MARKET_EXIT=true`.
 - AI policy is **gated**: it can only choose actions/symbols from data the bot provides, and the engine still enforces exchange rules (minQty/minNotional), risk flags, allocation caps, and daily loss caps. It can still lose money—test on small size or testnet first.
   - Risk increases proposed by AI are blocked unless `AI_POLICY_ALLOW_RISK_RELAXATION=true` (default false).

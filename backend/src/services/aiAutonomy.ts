@@ -7,11 +7,16 @@ export const resolveAutonomy = (
     aiPolicyAllowRiskRelaxation: boolean;
     aiPolicySweepAutoApply: boolean;
     autoBlacklistEnabled: boolean;
+    gridEnabled: boolean;
+    tradeVenue: 'spot' | 'futures';
   },
   governorState: RiskGovernorState | null | undefined,
 ): AiAutonomyCapabilities => {
   const governorNormal = governorState === 'NORMAL';
   const allowRiskRelaxation = envFlags.aiPolicyAllowRiskRelaxation && governorNormal;
+
+  // Capability flags are for UI/exposed autonomy. Execution still enforces hard risk limits elsewhere.
+  const canResumeGridByProfile = profile !== 'safe' && envFlags.tradeVenue === 'spot' && envFlags.gridEnabled;
 
   switch (profile) {
     case 'standard':
@@ -20,7 +25,7 @@ export const resolveAutonomy = (
         canAutoApplyTuningRelax: false,
         canAutoSweepToHome: envFlags.aiPolicySweepAutoApply,
         canPauseGrid: true,
-        canResumeGrid: false,
+        canResumeGrid: canResumeGridByProfile,
         canAutoBlacklistSymbols: envFlags.autoBlacklistEnabled,
         canEnableUnwindPlans: false,
       };
@@ -30,7 +35,7 @@ export const resolveAutonomy = (
         canAutoApplyTuningRelax: allowRiskRelaxation,
         canAutoSweepToHome: envFlags.aiPolicySweepAutoApply,
         canPauseGrid: true,
-        canResumeGrid: allowRiskRelaxation,
+        canResumeGrid: canResumeGridByProfile,
         canAutoBlacklistSymbols: envFlags.autoBlacklistEnabled,
         canEnableUnwindPlans: false,
       };
@@ -40,7 +45,7 @@ export const resolveAutonomy = (
         canAutoApplyTuningRelax: allowRiskRelaxation,
         canAutoSweepToHome: envFlags.aiPolicySweepAutoApply,
         canPauseGrid: true,
-        canResumeGrid: allowRiskRelaxation,
+        canResumeGrid: canResumeGridByProfile,
         canAutoBlacklistSymbols: envFlags.autoBlacklistEnabled,
         canEnableUnwindPlans: false,
       };
